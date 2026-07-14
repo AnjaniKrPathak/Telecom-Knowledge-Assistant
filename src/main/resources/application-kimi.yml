@@ -1,0 +1,18 @@
+# Activate with: --spring.profiles.active=kimi   (or SPRING_PROFILES_ACTIVE=kimi)
+#
+# Kimi (Moonshot AI). Moonshot exposes an OpenAI-compatible /chat/completions API, so this
+# reuses langchain4j's OpenAiChatModel client pointed at Moonshot's base URL.
+# Requires: export KIMI_API_KEY=sk-...
+#
+# Model choices (pick based on context window needed):
+#   moonshot-v1-8k   — 8K context, cheapest
+#   moonshot-v1-32k  — 32K context
+#   moonshot-v1-128k — 128K context
+
+llm:
+  provider: kimi
+  model-name: kimi-k2.6
+  base-url: https://litellm.ai.netcracker.cloud/v1/chat/completions
+  api-key: ${KIMI_API_KEY:sk-ufwZBGlGzf8g6oYqXdcZUA}
+  temperature: 0.7
+  timeout-minutes: 5
