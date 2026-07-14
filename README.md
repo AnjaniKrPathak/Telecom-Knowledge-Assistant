@@ -158,6 +158,60 @@ curl -X DELETE http://localhost:8080/api/documents/{id}
 
 ---
 
+## Hybrid Search
+
+Retrieval combines two complementary signals instead of relying on vector similarity alone:
+
+- **Vector leg** — the existing pgvector cosine-similarity search (semantic/paraphrase matches).
+- **Keyword leg** — PostgreSQL full-text search (`tsvector` + GIN index) over the same chunks,
+  which is what actually finds exact terms embeddings tend to under-weight: ticket numbers,
+  error codes, product/model names, acronyms.
+
+Both ranked lists are merged with **Reciprocal Rank Fusion (RRF)**, which combines results by
+rank position rather than by raw score, so no manual tuning of relative weights is needed even
+though cosine similarity and `ts_rank_cd` live on different scales.
+
+On startup, a schema migration (`FullTextSearchSchemaInitializer`) adds a generated
+`text_search_vector` column and GIN index to the existing `document_embeddings` table — no
+manual SQL required, and no changes to ingestion. If that migration can't run for any reason,
+hybrid search automatically falls back to vector-only retrieval and logs a warning instead of
+failing queries.
+
+Tunable via `rag.hybrid.*` in `application.yml` (see the Configuration table below).
+
+---
+
+## Switching LLM Providers
+
+The chat model is provider-switchable via Spring profiles — no code changes needed. Four
+profiles ship out of the box:
+
+| Profile | Provider | Model | Requires |
+|---|---|---|---|
+| `llama3` (default) | Local Ollama | `llama3` | Nothing — runs locally |
+| `kimi` | Moonshot AI | `moonshot-v1-8k` | `KIMI_API_KEY` |
+| `gpt` | OpenAI | `gpt-4o` | `OPENAI_API_KEY` |
+| `openai` | OpenAI | `gpt-3.5-turbo` | `OPENAI_API_KEY` |
+
+Activate one with `--spring.profiles.active=<name>` or the `SPRING_PROFILES_ACTIVE` env var:
+
+```bash
+export KIMI_API_KEY=sk-...
+./mvnw spring-boot:run -Dspring-boot.run.profiles=kimi
+```
+
+Each profile is its own `application-<name>.yml` file under `src/main/resources/`, setting
+`llm.provider`, `llm.model-name`, `llm.base-url`, and `llm.api-key`. Kimi and GPT/OpenAI all
+reuse the same OpenAI-compatible client (`langchain4j-open-ai`) — only the base URL, model
+name, and key differ — since Moonshot's Kimi API is OpenAI-compatible. The embedding model
+always stays on local Ollama (`nomic-embed-text`) regardless of which chat profile is active,
+since pgvector's column dimension is fixed at ingestion time.
+
+To add another provider, create a new `application-<name>.yml` following the same shape, and
+if it isn't OpenAI-compatible, add a case for it in `LangChainConfig.chatLanguageModel()`.
+
+---
+
 ## Configuration
 
 All settings are in `src/main/resources/application.yml`:
@@ -170,6 +224,11 @@ All settings are in `src/main/resources/application.yml`:
 | `rag.chunk-overlap` | `50` | Overlap between chunks |
 | `rag.max-results` | `5` | Top-k chunks retrieved |
 | `pgvector.dimension` | `768` | Embedding dimension |
+| `rag.hybrid.enabled` | `true` | Toggle keyword leg (vector-only if false) |
+| `rag.hybrid.candidate-multiplier` | `4` | Candidates pulled per leg before fusion = max-results × this |
+| `rag.hybrid.rrf-k` | `60` | Reciprocal Rank Fusion smoothing constant |
+| `rag.hybrid.min-vector-score` | `0.5` | Cosine-similarity floor for the vector leg |
+| `rag.hybrid.fts-language` | `english` | Postgres text-search configuration |
 
 ---
 

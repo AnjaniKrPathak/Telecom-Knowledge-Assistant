@@ -2,11 +2,20 @@ spring:
   application:
     name: rag-project
 
+  profiles:
+    active: default
+
   datasource:
-    url: jdbc:postgresql://localhost:5432/ragdb
+    url: jdbc:postgresql://localhost:5434/ragdb
     username: raguser
     password: ragpassword
     driver-class-name: org.postgresql.Driver
+    hikari:
+      minimum-idle: 2
+      maximum-pool-size: 5
+      connection-timeout: 30000
+      validation-timeout: 5000
+      max-lifetime: 1800000
 
   jpa:
     hibernate:
@@ -19,18 +28,30 @@ spring:
 
   servlet:
     multipart:
-      max-file-size: 50MB
-      max-request-size: 50MB
+      max-file-size: 200MB
+      max-request-size: 200MB
 
 server:
-  port: 8084
+  port: 8080
 
-# Ollama Configuration
+# Ollama Configuration (base URL + embedding model — used regardless of chat provider)
 ollama:
   base-url: http://localhost:11434
   chat-model: llama3
   embedding-model: nomic-embed-text
-  timeout: 120s
+  timeout: 1500s
+
+# LLM Chat Provider Configuration
+# Defaults to local llama3 via Ollama. Override by activating a profile:
+#   --spring.profiles.active=kimi   (or gpt / openai / llama3)
+# See application-llama3.yml, application-kimi.yml, application-gpt.yml, application-openai.yml
+llm:
+  provider: ollama       # ollama | openai | gpt | kimi
+  model-name: llama3
+  base-url: ""           # blank = use ollama.base-url above; required for openai/gpt/kimi
+  api-key: ""            # required for openai/gpt/kimi — set via env var in the profile file
+  temperature: 0.7
+  timeout-minutes: 15
 
 # PgVector Configuration
 pgvector:
@@ -40,14 +61,39 @@ pgvector:
 # RAG Configuration
 rag:
   chunk-size: 500
-  chunk-overlap: 50
-  max-results: 5          # top-k retrieved chunks
+  chunk-overlap: 10
+  max-results: 5        # top-k retrieved chunks
+  ingestion:
+    core-pool-size: 4     # threads always alive for concurrent document ingestion
+    max-pool-size: 8      # max threads under load
+    queue-capacity: 100   # files queued before max-pool-size kicks in
+  hybrid:
+    enabled: true             # combine vector search with Postgres keyword search
+    candidate-multiplier: 4   # candidates pulled from EACH leg = max-results * this, before fusion
+    rrf-k: 60                 # Reciprocal Rank Fusion smoothing constant
+    min-vector-score: 0.5     # cosine-similarity floor for the vector leg
+    fts-language: english     # Postgres text-search configuration (language)
+  excel:
+    rows-per-chunk: 1         # data rows grouped into a single embedded chunk (1 = one chunk per row)
+    header-detection: true    # use the first non-blank row of each sheet as column headers
+    max-cell-length: 2000     # truncate any single cell's text beyond this many characters
+    skip-blank-rows: true     # don't create chunks for fully empty rows
+  git:
+    workspace-dir: ./git-workspace    # local clone location (one subfolder per connected repo)
+    compute-diff-stats: true          # compute insertions/deletions/files-changed per commit
+    embed-commits: true               # index commit messages into the vector store for RAG chat
+    max-commits-per-sync: 20000       # safety cap per ingest/sync call
+    default-sprint-length-days: 14    # used by the fixed-length sprint auto-generator
+    core-pool-size: 2                 # threads always alive for git clone/sync jobs
+    max-pool-size: 4                  # max threads under load
+    queue-capacity: 50                # sync jobs queued before max-pool-size kicks in
 
 # Logging
 logging:
   level:
     com.rag: DEBUG
     dev.langchain4j: INFO
+    com.zaxxer.hikari: DEBUG
 
 # Springdoc
 springdoc:
@@ -55,3 +101,25 @@ springdoc:
     path: /swagger-ui.html
   api-docs:
     path: /api-docs
+
+# Webex Chatbot Configuration
+webex:
+  bot-token: ${WEBEX_BOT_TOKEN:NTI5ZjA1OGQtYTY4YS00NzU3LThhNTgtOTE1NGRhNGIzZWU0MjRhYTJlMzEtZDcy_PF84_ba052c1a-a74c-48df-aead-18cddd1bffcc}          # get this from https://developer.webex.com/my-apps -> Create a Bot
+  api-base-url: https://webexapis.com/v1
+  webhook-secret: ${WEBEX_WEBHOOK_SECRET:}  # optional, but recommended - must match the "secret" used when registering the webhook
+  bot-email: ${WEBEX_BOT_EMAIL:msexpert@webex.bot}
+
+  # --- Auto webhook sync: keeps the Webex webhook pointed at the current ngrok URL, no manual portal edits ---
+  webhook-name: SpringBootWebhook          # used to find/create/update "our" webhook among all webhooks on the account
+  webhook-target-path: /api/webex/webhook  # appended to the detected ngrok URL to build the webhook's targetUrl
+  webhook-resource: messages               # only used when creating a brand-new webhook
+  webhook-event: created                   # only used when creating a brand-new webhook
+  remove-duplicate-webhooks: true          # if multiple webhooks share webhook-name, delete all but the oldest
+  auto-sync-enabled: true                  # keep checking for ngrok URL changes after startup (not just once)
+  auto-sync-interval-ms: 60000             # how often (ms) the background scheduler checks for a changed ngrok URL
+
+# Ngrok Agent API (local) — used to auto-detect the current public tunnel URL
+ngrok:
+  api-url: http://localhost:4040/api/tunnels
+  startup-max-retries: 10        # retries while waiting for the ngrok agent to come up at app startup
+  startup-retry-delay-ms: 3000   # delay (ms) between those startup retries

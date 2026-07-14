@@ -1,0 +1,13 @@
+# Activate with: --spring.profiles.active=openai   (or SPRING_PROFILES_ACTIVE=openai)
+#
+# OpenAI GPT-3.5-turbo — cheaper, faster generic OpenAI default. Use the `gpt` profile
+# instead for the higher-quality gpt-4o tier.
+# Requires: export OPENAI_API_KEY=sk-...
+
+llm:
+  provider: openai
+  model-name: gpt-3.5-turbo
+  base-url: https://api.openai.com/v1
+  api-key: ${OPENAI_API_KEY}
+  temperature: 0.7
+  timeout-minutes: 5
