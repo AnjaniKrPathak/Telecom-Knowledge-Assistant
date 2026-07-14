@@ -90,6 +90,11 @@
             <artifactId>langchain4j-web-search-engine-google-custom</artifactId>
             <version>${langchain4j.version}</version>
         </dependency>
+        <!-- Caffeine — in-memory cache for RAG query responses (TTL-based, see QueryCacheService) -->
+        <dependency>
+            <groupId>com.github.ben-manes.caffeine</groupId>
+            <artifactId>caffeine</artifactId>
+        </dependency>
 
         <!-- PostgreSQL Driver -->
         <dependency>
