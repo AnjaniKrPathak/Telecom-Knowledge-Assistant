@@ -45,7 +45,7 @@ public class AsyncConfig implements AsyncConfigurer {
         return executor;
     }
 
-<<<<<<< HEAD
+
     // Separate, smaller pool for git clone/pull/walk jobs — kept independent from document
     // ingestion so a slow repo clone can't starve file uploads (and vice versa).
     @Value("${rag.git.core-pool-size:2}")
@@ -70,8 +70,6 @@ public class AsyncConfig implements AsyncConfigurer {
         return executor;
     }
 
-=======
->>>>>>> origin/feather/cache-integration
     @Override
     public Executor getAsyncExecutor() {
         return ingestionTaskExecutor();
