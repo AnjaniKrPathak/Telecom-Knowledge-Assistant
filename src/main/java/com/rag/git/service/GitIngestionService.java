@@ -54,10 +54,10 @@ public class GitIngestionService {
     private final GitIngestionService self;
 
     public GitIngestionService(GitRepositoryJpaRepository repoRepository,
-                                CommitJpaRepository commitRepository,
-                                GitIngestionProperties properties,
-                                IngestionService ingestionService,
-                                @Lazy GitIngestionService self) {
+                               CommitJpaRepository commitRepository,
+                               GitIngestionProperties properties,
+                               IngestionService ingestionService,
+                               @Lazy GitIngestionService self) {
         this.repoRepository = repoRepository;
         this.commitRepository = commitRepository;
         this.properties = properties;

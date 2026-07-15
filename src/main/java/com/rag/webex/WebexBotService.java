@@ -50,11 +50,11 @@ public class WebexBotService {
             if ("test-id".equals(event.getData().getId())) {
                 // Use event.getData().getText() directly
             } else {
-                 message = webexClient.getMessage(event.getData().getId());
-                 log.info("message" + message);
+                message = webexClient.getMessage(event.getData().getId());
+                log.info("message" + message);
             }
-           // WebexMessage message = webexClient.getMessage(data.getId());
-           String question = cleanQuestion(message.getText());
+            // WebexMessage message = webexClient.getMessage(data.getId());
+            String question = cleanQuestion(message.getText());
 
 
             if (question == null || question.isBlank()) {
@@ -63,15 +63,15 @@ public class WebexBotService {
                 return;
             }
 
-           // log.info("Webex question from {}: {}", message.getPersonEmail(), question);
+            // log.info("Webex question from {}: {}", message.getPersonEmail(), question);
 
             RagResponse ragResponse = ragQueryService.query(question);
             String reply = formatReply(ragResponse);
-           if(message != null ){
-               webexClient.sendMessageToRoom(message.getRoomId(), reply);
-           }else{
-               webexClient.sendMessageToRoom("Y2lzY29zcGFyazovL3VzL1BFT1BMRS9hODg0M2QzMS1lMmQ0LTQ0MmUtYTU0OC0xM2I0MzUyZmU1MzU", reply);
-           }
+            if(message != null ){
+                webexClient.sendMessageToRoom(message.getRoomId(), reply);
+            }else{
+                webexClient.sendMessageToRoom("Y2lzY29zcGFyazovL3VzL1BFT1BMRS9hODg0M2QzMS1lMmQ0LTQ0MmUtYTU0OC0xM2I0MzUyZmU1MzU", reply);
+            }
 
 
         } catch (Exception e) {
@@ -93,9 +93,9 @@ public class WebexBotService {
             sb.append("\n\n**Sources:**\n");
             ragResponse.sources().forEach(src -> {
                 sb.append("- ").append(src.source()).append(" (").append(src.type());
-                if (src.location() != null) {
+               /* if (src.location() != null) {
                     sb.append(" — ").append(src.location());
-                }
+                }*/
                 sb.append(")\n");
             });
         }
