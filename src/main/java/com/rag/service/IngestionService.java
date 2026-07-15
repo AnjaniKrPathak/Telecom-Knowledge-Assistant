@@ -36,6 +36,7 @@ public class IngestionService {
     private final ExcelStructuredChunker excelChunker;
     private final EmbeddingStore<TextSegment> embeddingStore;
     private final DocumentRepository documentRepository;
+    private static final int EMBEDDING_BATCH_SIZE = 100;
 
     @Value("${rag.chunk-size}")
     private int chunkSize;
@@ -113,15 +114,18 @@ public class IngestionService {
         DocumentSplitter splitter = DocumentSplitters.recursive(chunkSize, chunkOverlap);
         List<TextSegment> segments = splitter.split(document);
         log.info("Split '{}' into {} chunks", source, segments.size());
+        //  Split in batch to save data
+        for (int i = 0; i < segments.size(); i += EMBEDDING_BATCH_SIZE) {
+            int end = Math.min(i + EMBEDDING_BATCH_SIZE, segments.size());
+            List<TextSegment> batch = segments.subList(i, end);
+            // 2. Embed chunks
+            List<Embedding> embeddings = embeddingModel.embedAll(batch).content();
+            log.info("Generated {} embeddings", embeddings.size());
 
-        // 2. Embed chunks
-        List<Embedding> embeddings = embeddingModel.embedAll(segments).content();
-        log.info("Generated {} embeddings", embeddings.size());
-
-        // 3. Store in pgvector
-        embeddingStore.addAll(embeddings, segments);
-        log.info("Stored embeddings in pgvector for '{}'", source);
-
+            // 3. Store in pgvector
+            embeddingStore.addAll(embeddings, batch);
+            log.info("Embedded batch {}-{}", i, end);
+        }
         // 4. Save metadata record
         DocumentRecord record = DocumentRecord.builder()
                 .name(source)
@@ -150,13 +154,13 @@ public class IngestionService {
 
     // ── Shared embed + store step ─────────────────────────────────────────────
     private void embedAndStore(List<TextSegment> segments, String source) {
-        int batchSize = 100;
+
         //  Convert large list of segments into smaller batches to avoid memory issues and improve performance
-        for (int i = 0; i < segments.size(); i += batchSize) {
+        for (int i = 0; i < segments.size(); i += EMBEDDING_BATCH_SIZE) {
 
             List<TextSegment> batch = segments.subList(
                     i,
-                    Math.min(i + batchSize, segments.size())
+                    Math.min(i + EMBEDDING_BATCH_SIZE, segments.size())
             );
 
             // Embed chunks
@@ -168,7 +172,7 @@ public class IngestionService {
             log.info("Stored embeddings in pgvector for '{}'", source);
             log.info("Stored batch {} - {}",
                     i,
-                    Math.min(i + batchSize, segments.size()));
+                    Math.min(i + EMBEDDING_BATCH_SIZE, segments.size()));
         }
     }
 

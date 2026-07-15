@@ -16,6 +16,7 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.List;
+import java.util.Optional;
 import java.util.stream.Collectors;
 
 @Slf4j
@@ -26,12 +27,20 @@ public class RagQueryService {
     private final ChatLanguageModel chatLanguageModel;
     private final EmbeddingModel embeddingModel;
     private final EmbeddingStore<TextSegment> embeddingStore;
+    private final QueryCacheService queryCacheService;
 
     @Value("${rag.max-results}")
     private int maxResults;
 
     public RagResponse query(String question) {
         log.info("RAG query: {}", question);
+
+        // 0. Cache check — if this same question (normalized) was answered within the TTL
+        // window, return that answer directly and skip retrieval + LLM generation entirely.
+        Optional<RagResponse> cached = queryCacheService.get(question);
+        if (cached.isPresent()) {
+            return cached.get();
+        }
 
         // 1. Embed the question
         Embedding questionEmbedding = embeddingModel.embed(question).content();
