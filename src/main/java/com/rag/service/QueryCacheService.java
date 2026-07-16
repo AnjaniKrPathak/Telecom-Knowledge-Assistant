@@ -47,15 +47,17 @@ public class QueryCacheService {
 
     /** Returns the cached answer for this question, if present and not expired. */
     public Optional<RagResponse> get(String question) {
+        log.info("Cache check for question: \"{}\"", question+"properties.isEnabled()="+properties.isEnabled());
         if (!properties.isEnabled()) {
             return Optional.empty();
         }
         String key = normalize(question);
         RagResponse cached = cache.getIfPresent(key);
+        log.info("Cache check for question: \"{}\" — present={}", question, cached );
         if (cached != null) {
-            log.info("✅ Cache HIT for question: \"{}\"", question);
+            log.info("Cache HIT for question: \"{}\"", question);
         } else {
-            log.info("❌ Cache MISS for question: \"{}\"", question);
+            log.info("Cache MISS for question: \"{}\"", question);
         }
         return Optional.ofNullable(cached);
     }
