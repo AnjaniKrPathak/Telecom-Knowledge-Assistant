@@ -93,6 +93,19 @@ rag:
     max-size: 500              # max distinct questions held in memory at once (LRU-evicted beyond this)
     normalize-whitespace: true # trim + collapse whitespace before using the question as a cache key
     case-sensitive: false      # "What is X?" and "what is x?" are treated as the same cached question
+  memory:
+    enabled: true              # fold prior turns into the prompt so follow-up questions resolve correctly
+    max-turns: 5               # prior user/assistant turn PAIRS included as history in the prompt
+    max-history-chars: 4000    # hard cap on the size of the history block injected into the prompt
+    persist: true              # store every turn in Postgres (conversation_messages table)
+    retention-days: 30         # nightly job purges conversation turns older than this
+  feedback:
+    enabled: true              # let accumulated thumbs up/down nudge retrieval ranking per source
+    boost-weight: 0.03         # score adjustment applied per net vote (up - down) for a source
+    max-boost: 0.2             # cap on the absolute adjustment any single source can accumulate
+    min-votes-for-adjustment: 1 # a source needs at least this many net votes before it's nudged
+    webex-text-shortcuts-enabled: true  # let Webex users reply thumbs up/down to rate the bot's last answer
+    webex-comment-prompt-ttl-minutes: 5  # how long the bot waits for an optional comment after a Webex rating
 
 # Logging
 logging:
@@ -121,6 +134,8 @@ webex:
   webhook-resource: messages               # only used when creating a brand-new webhook
   webhook-event: created                   # only used when creating a brand-new webhook
   remove-duplicate-webhooks: true          # if multiple webhooks share webhook-name, delete all but the oldest
+  actions-webhook-name: SpringBootWebhookActions  # 2nd webhook (attachmentActions/created) powering inline Like/Dislike buttons
+  attachment-actions-webhook-enabled: true  # send answers as Adaptive Cards with tappable Like/Dislike buttons instead of plain text
   auto-sync-enabled: true                  # keep checking for ngrok URL changes after startup (not just once)
   auto-sync-interval-ms: 60000             # how often (ms) the background scheduler checks for a changed ngrok URL
 

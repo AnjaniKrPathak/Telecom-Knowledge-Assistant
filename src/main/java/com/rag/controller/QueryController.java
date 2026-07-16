@@ -19,13 +19,17 @@ public class QueryController {
     private final RagQueryService ragQueryService;
 
     @PostMapping
-    @Operation(summary = "Ask a question – returns answer + source references")
+    @Operation(summary = "Ask a question – returns answer + source references. " +
+            "Pass back the \"sessionId\" from a previous response to continue that conversation " +
+            "(follow-up questions are resolved using the conversation history); omit it to start a new one. " +
+            "Every response also includes an \"interactionId\" — submit it to POST /api/feedback to rate the answer.")
     public ResponseEntity<RagResponse> query(@RequestBody Map<String, String> body) {
         String question = body.get("question");
         if (question == null || question.isBlank()) {
             return ResponseEntity.badRequest().build();
         }
-        RagResponse response = ragQueryService.query(question);
+        String sessionId = body.get("sessionId");
+        RagResponse response = ragQueryService.query(question, sessionId);
         return ResponseEntity.ok(response);
     }
 }
