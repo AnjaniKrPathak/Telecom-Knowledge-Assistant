@@ -1,89 +1,120 @@
 package com.rag.service;
 
-import dev.langchain4j.data.message.AiMessage;
-import dev.langchain4j.data.message.UserMessage;
+import com.rag.config.RerankerProperties;
+import com.rag.rerank.RerankCandidate;
+import com.rag.rerank.RerankedCandidate;
+import com.rag.rerank.RerankerProvider;
 import dev.langchain4j.data.segment.TextSegment;
-import dev.langchain4j.model.chat.ChatLanguageModel;
-import dev.langchain4j.model.output.Response;
 import dev.langchain4j.store.embedding.EmbeddingMatch;
-import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
-import java.util.concurrent.CompletableFuture;
-import java.util.regex.Matcher;
-import java.util.regex.Pattern;
+import java.util.Map;
+import java.util.Objects;
+import java.util.Set;
 import java.util.stream.Collectors;
 
+/**
+ * Orchestrates reranking of retrieved chunks for RagQueryService: picks the active
+ * {@link RerankerProvider} bean by {@code rag.reranker.provider}, translates to/from the
+ * embedding-store-specific {@code EmbeddingMatch<TextSegment>} type so providers stay
+ * framework-agnostic, and falls back to the original vector-similarity order if the provider
+ * fails and {@code rag.reranker.fail-open} is true — a bad/unreachable reranker degrades
+ * gracefully instead of breaking the query.
+ * <p>
+ * To add a new backend, implement {@link RerankerProvider} and register it as a Spring bean;
+ * every implementation on the classpath is auto-discovered here via constructor injection of
+ * {@code List<RerankerProvider>} — no changes needed in this class.
+ */
 @Slf4j
 @Service
-@RequiredArgsConstructor
 public class RerankerService {
 
-    private final ChatLanguageModel chatLanguageModel;
+    private final Map<String, RerankerProvider> providersById;
+    private final RerankerProperties properties;
 
-    private static final Pattern SCORE_PATTERN = Pattern.compile("\\d+");
-    private static final int MAX_PASSAGE_CHARS = 800;
-
-    public List<EmbeddingMatch<TextSegment>> rerank(String query,
-                                                    List<EmbeddingMatch<TextSegment>> candidates,
-                                                    int topN) {
-        if (candidates.size() <= topN) {
-            return candidates;
-        }
-
-        log.info("Reranking {} candidates down to top {}", candidates.size(), topN);
-
-        List<CompletableFuture<ScoredMatch>> futures = candidates.stream()
-                .map(match -> CompletableFuture.supplyAsync(() ->
-                        new ScoredMatch(match, scoreRelevance(query, match.embedded().text()))))
-                .toList();
-
-        List<ScoredMatch> scored = futures.stream()
-                .map(CompletableFuture::join)
-                .sorted((a, b) -> Integer.compare(b.score(), a.score()))
-                .collect(Collectors.toList());
-
-        return scored.stream()
-                .limit(topN)
-                .map(ScoredMatch::match)
-                .collect(Collectors.toList());
+    public RerankerService(List<RerankerProvider> providers, RerankerProperties properties) {
+        this.providersById = providers.stream()
+                .collect(Collectors.toMap(RerankerProvider::id, p -> p));
+        this.properties = properties;
+        log.info("🔀 Reranker initialized (enabled={}, provider={}, candidatePoolSize={}, available providers={})",
+                properties.isEnabled(), properties.getProvider(), properties.getCandidatePoolSize(),
+                providersById.keySet());
     }
 
-    private int scoreRelevance(String query, String passage) {
-        String prompt = """
-                Rate how relevant the PASSAGE is to answering the QUESTION.
-                Respond with ONLY a single integer from 0 to 10 (10 = highly relevant, 0 = irrelevant).
-                No explanation, no words, just the number.
+    /**
+     * Re-orders {@code matches} using the configured provider. Returns the FULL list re-sorted
+     * (never trimmed) so callers can still apply their own downstream adjustments (e.g.
+     * feedback-based boosting in RagQueryService) before cutting down to the final context size.
+     */
+    public List<EmbeddingMatch<TextSegment>> rerank(String query, List<EmbeddingMatch<TextSegment>> matches) {
+        if (!properties.isEnabled() || matches.size() <= 1) {
+            return matches;
+        }
 
-                QUESTION: %s
+        RerankerProvider provider = providersById.get(properties.getProvider());
+        if (provider == null) {
+            log.warn("Unknown rag.reranker.provider '{}' (available: {}) — skipping rerank, keeping vector order",
+                    properties.getProvider(), providersById.keySet());
+            return matches;
+        }
 
-                PASSAGE: %s
+        List<RerankCandidate> candidates = new ArrayList<>(matches.size());
+        for (int i = 0; i < matches.size(); i++) {
+            EmbeddingMatch<TextSegment> match = matches.get(i);
+            candidates.add(new RerankCandidate(String.valueOf(i), match.embedded().text(), match.score()));
+        }
 
-                SCORE:
-                """.formatted(query, truncate(passage, MAX_PASSAGE_CHARS));
 
         try {
-            Response<AiMessage> response = chatLanguageModel.generate(UserMessage.from(prompt));
-            return parseScore(response.content().text());
+            List<RerankedCandidate> reranked = provider.rerank(query, candidates, matches.size());
+            List<EmbeddingMatch<TextSegment>> reordered = mapBackToMatches(matches, reranked);
+            for (int i = 0; i < Math.min(5, matches.size()); i++) {
+                var m = matches.get(i);
+                log.info("{} : score={} source={} text={}",
+                        i,
+                        m.score(),
+                        m.embedded().metadata().getString("source"),
+                        m.embedded().text().substring(0, Math.min(120, m.embedded().text().length())));
+            }
+            return reordered;
         } catch (Exception e) {
-            log.warn("Reranker scoring failed, defaulting to 0: {}", e.getMessage());
-            return 0;
+            if (properties.isFailOpen()) {
+                log.warn("⚠️ Reranker '{}' failed ({}) — falling back to original vector-similarity order",
+                        provider.id(), e.getMessage());
+                return matches;
+            }
+            throw e;
         }
     }
 
-    private String truncate(String text, int maxChars) {
-        return text.length() <= maxChars ? text : text.substring(0, maxChars);
-    }
+    /** Maps RerankedCandidate.id() back to the original EmbeddingMatch objects, preserving the provider's order. */
+    private List<EmbeddingMatch<TextSegment>> mapBackToMatches(
+            List<EmbeddingMatch<TextSegment>> matches, List<RerankedCandidate> reranked) {
 
-    private int parseScore(String response) {
-        Matcher m = SCORE_PATTERN.matcher(response);
-        if (m.find()) {
-            return Math.max(0, Math.min(10, Integer.parseInt(m.group())));
+        Map<String, EmbeddingMatch<TextSegment>> byId = new HashMap<>();
+        for (int i = 0; i < matches.size(); i++) {
+            byId.put(String.valueOf(i), matches.get(i));
         }
-        return 0;
-    }
 
-    private record ScoredMatch(EmbeddingMatch<TextSegment> match, int score) {}
+        List<EmbeddingMatch<TextSegment>> reordered = reranked.stream()
+                .map(rc -> byId.get(rc.id()))
+                .filter(Objects::nonNull)
+                .collect(Collectors.toList());
+
+        // Safety net: if the provider dropped any candidates (e.g. a malformed/partial response),
+        // append whatever's missing at the end rather than silently losing context.
+        if (reordered.size() < matches.size()) {
+            Set<String> seen = reranked.stream().map(RerankedCandidate::id).collect(Collectors.toSet());
+            for (int i = 0; i < matches.size(); i++) {
+                if (!seen.contains(String.valueOf(i))) {
+                    reordered.add(matches.get(i));
+                }
+            }
+        }
+        return reordered;
+    }
 }

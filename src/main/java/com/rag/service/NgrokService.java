@@ -3,6 +3,7 @@ package com.rag.service;
 import com.rag.config.NgrokProperties;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.stereotype.Service;
 import org.springframework.web.client.RestTemplate;
 
@@ -20,12 +21,20 @@ import java.util.concurrent.atomic.AtomicReference;
  * read once from config.
  */
 @Service
-@RequiredArgsConstructor
+
 @Slf4j
 public class NgrokService {
 
+
+
+    @Qualifier("webexRestTemplate")
     private final RestTemplate restTemplate;
     private final NgrokProperties ngrokProperties;
+
+    public NgrokService(@Qualifier("webexRestTemplate") RestTemplate restTemplate, NgrokProperties ngrokProperties) {
+        this.restTemplate = restTemplate;
+        this.ngrokProperties = ngrokProperties;
+    }
 
     /** Last URL we successfully detected, so callers can cheaply check "did it change?". */
     private final AtomicReference<String> lastKnownUrl = new AtomicReference<>();

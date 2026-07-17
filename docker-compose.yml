@@ -34,5 +34,34 @@ services:
       postgres:
         condition: service_healthy
 
+  # ── Hugging Face reranker (Text-Embeddings-Inference) ───────────────────────
+  # Powers com.rag.rerank.HuggingFaceRerankerProvider (rag.reranker.provider: huggingface).
+  # Fully local, no API key — downloads the model from Hugging Face Hub once on first start,
+  # then serves it from the hf-cache volume below. Matches rag.reranker.huggingface.base-url
+  # (http://localhost:8081) in application.yml.
+  #
+  # NOTE: Ollama is intentionally NOT included here — the app expects it running locally on
+  # its default port (11434), same as before.
+  hf-reranker:
+    image: ghcr.io/huggingface/text-embeddings-inference:cpu-latest
+    # If you have an NVIDIA GPU available to Docker, swap the image above for a CUDA tag
+    # (e.g. ghcr.io/huggingface/text-embeddings-inference:1.5) for significantly faster reranking.
+    # On Apple Silicon (M1/M2/M3) hosts without a CPU-arm64 build available, uncomment:
+    # platform: linux/amd64
+    container_name: rag-hf-reranker
+    restart: unless-stopped
+    command: ["--model-id", "BAAI/bge-reranker-base"]
+    ports:
+      - "8081:80"
+    volumes:
+      - hf-cache:/data
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:80/health"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 60s   # first start downloads model weights, give it time before failing health checks
+
 volumes:
   pgdata:
+  hf-cache:

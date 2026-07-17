@@ -5,8 +5,10 @@ import com.rag.model.dto.UpdateWebhookRequest;
 import com.rag.model.dto.WebhookItem;
 import com.rag.model.dto.WebhookListResponse;
 import com.rag.webex.WebexProperties;
+import lombok.NoArgsConstructor;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -36,13 +38,23 @@ import java.util.stream.Collectors;
  * (NgrokWebhookScheduler) so a mid-session ngrok restart is picked up automatically.
  */
 @Service
-@RequiredArgsConstructor
+
 @Slf4j
+
 public class WebexWebhookService {
 
+
+
+    @Qualifier("webexRestTemplate")
     private final RestTemplate restTemplate;
     private final NgrokService ngrokService;
     private final WebexProperties properties;
+
+    public WebexWebhookService(@Qualifier("webexRestTemplate") RestTemplate restTemplate, NgrokService ngrokService, WebexProperties properties) {
+        this.restTemplate = restTemplate;
+        this.ngrokService = ngrokService;
+        this.properties = properties;
+    }
 
     /** ngrok URL Webex was last successfully synced to, so the scheduler can skip API calls when nothing changed. */
     private final AtomicReference<String> lastSyncedUrl = new AtomicReference<>();

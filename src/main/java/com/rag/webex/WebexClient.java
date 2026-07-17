@@ -6,6 +6,7 @@ import com.rag.webex.dto.WebexPerson;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -33,6 +34,7 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class WebexClient {
 
+    @Qualifier("webexRestTemplate")
     private final RestTemplate webexRestTemplate;
     private final WebexProperties webexProperties;
 

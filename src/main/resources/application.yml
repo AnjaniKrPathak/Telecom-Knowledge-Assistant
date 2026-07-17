@@ -71,7 +71,7 @@ rag:
     enabled: true             # combine vector search with Postgres keyword search
     candidate-multiplier: 4   # candidates pulled from EACH leg = max-results * this, before fusion
     rrf-k: 60                 # Reciprocal Rank Fusion smoothing constant
-    min-vector-score: 0.5     # cosine-similarity floor for the vector leg
+    min-vector-score: 0.7     # cosine-similarity floor for the vector leg
     fts-language: english     # Postgres text-search configuration (language)
   excel:
     rows-per-chunk: 1         # data rows grouped into a single embedded chunk (1 = one chunk per row)
@@ -106,6 +106,14 @@ rag:
     min-votes-for-adjustment: 1 # a source needs at least this many net votes before it's nudged
     webex-text-shortcuts-enabled: true  # let Webex users reply thumbs up/down to rate the bot's last answer
     webex-comment-prompt-ttl-minutes: 5  # how long the bot waits for an optional comment after a Webex rating
+  reranker:
+    enabled: true              # rerank retrieved chunks for more accurate context before answering
+    provider: huggingface      # huggingface | llm | none
+    candidate-pool-size: 10    # vector-search fetch size BEFORE reranking (kept >= rag.max-results)
+    fail-open: true            # if the reranker call fails, fall back to plain vector-similarity order
+    huggingface:
+      base-url: http://localhost:8081  # local Hugging Face Text-Embeddings-Inference (TEI) rerank server, no API key
+      timeout-ms: 30000
 
 # Logging
 logging:

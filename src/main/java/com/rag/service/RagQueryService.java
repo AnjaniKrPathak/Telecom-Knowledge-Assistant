@@ -1,6 +1,7 @@
 package com.rag.service;
 
 import com.rag.config.ConversationMemoryProperties;
+import com.rag.config.RerankerProperties;
 import dev.langchain4j.data.embedding.Embedding;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.UserMessage;
@@ -33,6 +34,8 @@ public class RagQueryService {
     private final ConversationMemoryService conversationMemoryService;
     private final ConversationMemoryProperties memoryProperties;
     private final FeedbackService feedbackService;
+    private final RerankerService rerankerService;
+    private final RerankerProperties rerankerProperties;
 
     @Value("${rag.max-results}")
     private int maxResults;
@@ -59,6 +62,9 @@ public class RagQueryService {
 
         boolean isFollowUp = memoryProperties.isEnabled() && conversationMemoryService.hasHistory(effectiveSessionId);
         conversationMemoryService.addUserMessage(effectiveSessionId, question);
+        log.info("Session {} isFollowUp={} (memory.enabled={}, memory.persist={}) -> cache {}",
+                effectiveSessionId, isFollowUp, memoryProperties.isEnabled(), memoryProperties.isPersist(),
+                isFollowUp ? "SKIPPED" : "checked");
 
         // 0. Cache check — only for the FIRST turn of a session. Once conversation history
         // exists, the same question text can legitimately need a different answer depending
@@ -73,19 +79,34 @@ public class RagQueryService {
         // 1. Embed the question
         Embedding questionEmbedding = embeddingModel.embed(question).content();
 
-        // 2. Retrieve top-k relevant chunks from pgvector
+        // 2. Retrieve candidates from pgvector. When reranking is on, cast a wider net
+        // (rag.reranker.candidate-pool-size) so the reranker has real choices to make, then trim
+        // down to rag.max-results after reranking + feedback-boosting below.
+        int fetchSize = rerankerProperties.isEnabled()
+                ? Math.max(rerankerProperties.getCandidatePoolSize(), maxResults)
+                : maxResults;
+
         EmbeddingSearchRequest searchRequest = EmbeddingSearchRequest.builder()
                 .queryEmbedding(questionEmbedding)
-                .maxResults(maxResults)
+                .maxResults(fetchSize)
                 .minScore(0.5)
                 .build();
 
         List<EmbeddingMatch<TextSegment>> matches = embeddingStore.search(searchRequest).matches();
-        log.info("Retrieved {} relevant chunks", matches.size());
+        log.info("Retrieved {} candidate chunks (fetchSize={})", matches.size(), fetchSize);
+
+        // 2a. Cross-encoder / LLM reranking — reorders by actual relevance to the question,
+        // which vector cosine-similarity alone often gets wrong for nuanced queries.
+        matches = rerankerService.rerank(question, matches);
 
         // 2b. Feedback-aware re-ranking — nudge chunks from historically thumbs-up'd sources
         // up, and thumbs-down'd sources down, before building the context/answer.
         matches = applyFeedbackRanking(matches);
+
+        // 2c. Trim down to the final context size now that reranking + feedback have both had a say.
+        if (matches.size() > maxResults) {
+            matches = matches.subList(0, maxResults);
+        }
 
         if (matches.isEmpty()) {
             String noAnswer = "I don't have enough information in the knowledge base to answer this question.";
@@ -147,13 +168,28 @@ public class RagQueryService {
         return new RagResponse(cached.question(), cached.answer(), cached.sources(), sessionId, interactionId);
     }
 
-    /** Re-orders matches by (original cosine score + accumulated feedback boost for that chunk's source). */
+    /**
+     * Nudges the current order (already best-first, from the reranker or raw vector search) using
+     * accumulated feedback. Deliberately does NOT resort by {@code match.score()} — that's the raw
+     * cosine score, which reranking cannot change (EmbeddingMatch is immutable), so sorting by it
+     * here would silently undo whatever the reranker just did. Instead each candidate gets a
+     * normalized [0,1] "rank score" from its CURRENT position, and feedback's small boost/penalty
+     * (capped by rag.feedback.max-boost) nudges from there — enough to reorder close calls, not
+     * enough to override a strong reranker signal.
+     */
     private List<EmbeddingMatch<TextSegment>> applyFeedbackRanking(List<EmbeddingMatch<TextSegment>> matches) {
-        return matches.stream()
-                .sorted(Comparator.comparingDouble((EmbeddingMatch<TextSegment> match) -> {
-                    String source = match.embedded().metadata().getString("source");
-                    return match.score() + feedbackService.sourceBoost(source);
+        int n = matches.size();
+        if (n <= 1) {
+            return matches;
+        }
+        return java.util.stream.IntStream.range(0, n)
+                .boxed()
+                .sorted(Comparator.comparingDouble((Integer i) -> {
+                    double rankScore = 1.0 - (i / (double) n);
+                    String source = matches.get(i).embedded().metadata().getString("source");
+                    return rankScore + feedbackService.sourceBoost(source);
                 }).reversed())
+                .map(matches::get)
                 .collect(Collectors.toList());
     }
 
