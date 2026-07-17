@@ -1,10 +1,12 @@
 package com.rag.webex;
 
+import com.rag.webex.dto.WebexAttachmentAction;
 import com.rag.webex.dto.WebexMessage;
 import com.rag.webex.dto.WebexPerson;
 import jakarta.annotation.PostConstruct;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -14,6 +16,7 @@ import org.springframework.web.client.RestClientException;
 import org.springframework.web.client.RestTemplate;
 
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 
 /**
@@ -31,6 +34,7 @@ import java.util.Map;
 @RequiredArgsConstructor
 public class WebexClient {
 
+    @Qualifier("webexRestTemplate")
     private final RestTemplate webexRestTemplate;
     private final WebexProperties webexProperties;
 
@@ -89,6 +93,33 @@ public class WebexClient {
         body.put("toPersonEmail", personEmail);
         body.put("markdown", text);
         return postMessage(body);
+    }
+
+    /**
+     * POST /v1/messages with an Adaptive Card attachment — renders as tappable buttons (e.g. inline
+     * 👍 Like / 👎 Dislike under an answer) in Webex clients that support cards. {@code fallbackText}
+     * is sent alongside as the plain "markdown" field for clients/notifications that don't render cards.
+     */
+    public WebexMessage sendCardToRoom(String roomId, String fallbackText, Map<String, Object> card) {
+        Map<String, Object> body = new HashMap<>();
+        body.put("roomId", roomId);
+        body.put("markdown", fallbackText);
+        body.put("attachments", List.of(Map.of(
+                "contentType", "application/vnd.microsoft.card.adaptive",
+                "content", card
+        )));
+        return postMessage(body);
+    }
+
+    /** GET /v1/attachment/actions/{id} — resolves which Action.Submit button was tapped and the "data" it carried. */
+    public WebexAttachmentAction getAttachmentAction(String actionId) {
+        HttpEntity<Void> request = new HttpEntity<>(authHeaders());
+        return webexRestTemplate.exchange(
+                webexProperties.getApiBaseUrl() + "/attachment/actions/" + actionId,
+                HttpMethod.GET,
+                request,
+                WebexAttachmentAction.class
+        ).getBody();
     }
 
     private WebexMessage postMessage(Map<String, Object> body) {

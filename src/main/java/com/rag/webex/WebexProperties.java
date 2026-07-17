@@ -47,6 +47,16 @@ public class WebexProperties {
     /** If more than one webhook exists with webhookName, delete all but the oldest one. */
     private boolean removeDuplicateWebhooks = true;
 
+    /**
+     * Name used to find/create/update the SECOND webhook — subscribed to attachmentActions/created,
+     * i.e. Adaptive Card button taps — which powers the inline 👍 Like / 👎 Dislike buttons shown
+     * under every answer. Kept in sync alongside the messages webhook with zero manual portal steps.
+     */
+    private String actionsWebhookName = "SpringBootWebhookActions";
+
+    /** Master switch for inline Like/Dislike buttons. When false, only the "messages" webhook is managed and feedback stays reply-text-only ("👍"/"👎"). */
+    private boolean attachmentActionsWebhookEnabled = true;
+
     /** Whether to periodically re-check the ngrok URL after startup and re-sync automatically. */
     private boolean autoSyncEnabled = true;
 

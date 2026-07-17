@@ -5,8 +5,10 @@ import com.rag.model.dto.UpdateWebhookRequest;
 import com.rag.model.dto.WebhookItem;
 import com.rag.model.dto.WebhookListResponse;
 import com.rag.webex.WebexProperties;
+import lombok.NoArgsConstructor;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.beans.factory.annotation.Qualifier;
 import org.springframework.http.HttpEntity;
 import org.springframework.http.HttpHeaders;
 import org.springframework.http.HttpMethod;
@@ -36,13 +38,23 @@ import java.util.stream.Collectors;
  * (NgrokWebhookScheduler) so a mid-session ngrok restart is picked up automatically.
  */
 @Service
-@RequiredArgsConstructor
+
 @Slf4j
+
 public class WebexWebhookService {
 
+
+
+    @Qualifier("webexRestTemplate")
     private final RestTemplate restTemplate;
     private final NgrokService ngrokService;
     private final WebexProperties properties;
+
+    public WebexWebhookService(@Qualifier("webexRestTemplate") RestTemplate restTemplate, NgrokService ngrokService, WebexProperties properties) {
+        this.restTemplate = restTemplate;
+        this.ngrokService = ngrokService;
+        this.properties = properties;
+    }
 
     /** ngrok URL Webex was last successfully synced to, so the scheduler can skip API calls when nothing changed. */
     private final AtomicReference<String> lastSyncedUrl = new AtomicReference<>();
@@ -95,53 +107,70 @@ public class WebexWebhookService {
         log.info("Detected ngrok URL   : {}", ngrokPublicUrl);
         log.info("Target webhook URL   : {}", targetUrl);
 
-        List<WebhookItem> matches;
-        try {
-            matches = findWebhooksByName(properties.getWebhookName());
-        } catch (Exception e) {
-            log.error("❌ Failed to list Webex webhooks — check webex.bot-token. Cause: {}", e.getMessage());
-            log.info("=============================================================");
-            return;
+        List<WebhookDefinition> definitions = new java.util.ArrayList<>();
+        definitions.add(new WebhookDefinition(
+                properties.getWebhookName(), properties.getWebhookResource(), properties.getWebhookEvent()));
+        if (properties.isAttachmentActionsWebhookEnabled()) {
+            // Powers the inline 👍 Like / 👎 Dislike buttons — Webex fires this event whenever
+            // someone taps an Action.Submit button on a card we sent (see WebexBotService).
+            definitions.add(new WebhookDefinition(properties.getActionsWebhookName(), "attachmentActions", "created"));
         }
-        log.info("Existing webhooks named '{}': {}", properties.getWebhookName(), matches.size());
 
-        try {
-            if (matches.isEmpty()) {
-                WebhookItem created = createWebhook(targetUrl);
-                log.info("✅ Created webhook '{}' (id={}) -> {}", created.getName(), created.getId(), created.getTargetUrl());
-                verifyWebhook(created.getId(), targetUrl);
-            } else {
-                matches.sort(Comparator.comparing(
-                        WebhookItem::getCreated, Comparator.nullsLast(Comparator.naturalOrder())));
-                WebhookItem primary = matches.get(0);
-
-                if (matches.size() > 1) {
-                    log.warn("⚠️ Found {} duplicate webhooks named '{}'.", matches.size(), properties.getWebhookName());
-                    if (properties.isRemoveDuplicateWebhooks()) {
-                        for (WebhookItem dup : matches.subList(1, matches.size())) {
-                            deleteWebhook(dup.getId());
-                            log.info("🗑️ Removed duplicate webhook (id={})", dup.getId());
-                        }
-                    }
-                }
-
-                if (targetUrl.equals(primary.getTargetUrl())) {
-                    log.info("✅ Webhook '{}' (id={}) already points to the current URL — no update needed.",
-                            primary.getName(), primary.getId());
-                } else {
-                    log.info("Updating webhook (id={}): '{}' -> '{}'", primary.getId(), primary.getTargetUrl(), targetUrl);
-                    updateWebhookUrl(primary.getId(), targetUrl);
-                    log.info("✅ Webhook updated successfully.");
-                }
-                verifyWebhook(primary.getId(), targetUrl);
+        boolean anyFailure = false;
+        for (WebhookDefinition def : definitions) {
+            try {
+                syncOneWebhook(def, targetUrl);
+            } catch (Exception e) {
+                anyFailure = true;
+                log.error("❌ Webex webhook sync failed for '{}' ({}/{}): {}",
+                        def.name(), def.resource(), def.event(), e.getMessage(), e);
             }
+        }
+        if (!anyFailure) {
             lastSyncedUrl.set(ngrokPublicUrl);
-        } catch (Exception e) {
-            log.error("❌ Webex webhook sync failed: {}", e.getMessage(), e);
         }
 
         log.info("=============================================================");
     }
+
+    private void syncOneWebhook(WebhookDefinition def, String targetUrl) {
+        List<WebhookItem> matches = findWebhooksByName(def.name());
+        log.info("Existing webhooks named '{}': {}", def.name(), matches.size());
+
+        if (matches.isEmpty()) {
+            WebhookItem created = createWebhook(def.name(), def.resource(), def.event(), targetUrl);
+            log.info("✅ Created webhook '{}' (id={}) -> {}", created.getName(), created.getId(), created.getTargetUrl());
+            verifyWebhook(created.getId(), targetUrl);
+            return;
+        }
+
+        matches.sort(Comparator.comparing(
+                WebhookItem::getCreated, Comparator.nullsLast(Comparator.naturalOrder())));
+        WebhookItem primary = matches.get(0);
+
+        if (matches.size() > 1) {
+            log.warn("⚠️ Found {} duplicate webhooks named '{}'.", matches.size(), def.name());
+            if (properties.isRemoveDuplicateWebhooks()) {
+                for (WebhookItem dup : matches.subList(1, matches.size())) {
+                    deleteWebhook(dup.getId());
+                    log.info("🗑️ Removed duplicate webhook (id={})", dup.getId());
+                }
+            }
+        }
+
+        if (targetUrl.equals(primary.getTargetUrl())) {
+            log.info("✅ Webhook '{}' (id={}) already points to the current URL — no update needed.",
+                    primary.getName(), primary.getId());
+        } else {
+            log.info("Updating webhook (id={}): '{}' -> '{}'", primary.getId(), primary.getTargetUrl(), targetUrl);
+            updateWebhookUrl(primary.getId(), def.name(), targetUrl);
+            log.info("✅ Webhook updated successfully.");
+        }
+        verifyWebhook(primary.getId(), targetUrl);
+    }
+
+    /** One "our webhook should exist with this name/resource/event" rule the sync loop enforces. */
+    private record WebhookDefinition(String name, String resource, String event) {}
 
     // ---------- Webex API calls ----------
 
@@ -162,12 +191,12 @@ public class WebexWebhookService {
                 .collect(Collectors.toList());
     }
 
-    public WebhookItem createWebhook(String targetUrl) {
+    public WebhookItem createWebhook(String name, String resource, String event, String targetUrl) {
         CreateWebhookRequest request = CreateWebhookRequest.builder()
-                .name(properties.getWebhookName())
+                .name(name)
                 .targetUrl(targetUrl)
-                .resource(properties.getWebhookResource())
-                .event(properties.getWebhookEvent())
+                .resource(resource)
+                .event(event)
                 .secret(blankToNull(properties.getWebhookSecret()))
                 .build();
 
@@ -180,9 +209,9 @@ public class WebexWebhookService {
         return response.getBody();
     }
 
-    public void updateWebhookUrl(String webhookId, String targetUrl) {
+    public void updateWebhookUrl(String webhookId, String name, String targetUrl) {
         UpdateWebhookRequest request = UpdateWebhookRequest.builder()
-                .name(properties.getWebhookName())
+                .name(name)
                 .targetUrl(targetUrl)
                 .secret(blankToNull(properties.getWebhookSecret()))
                 .build();

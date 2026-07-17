@@ -29,9 +29,15 @@ public class WebhookAdminController {
     private final WebexProperties properties;
 
     @GetMapping("/status")
-    @Operation(summary = "List Webex webhooks matching the configured name — confirms what's currently registered")
-    public List<WebhookItem> status() {
-        return webhookService.findWebhooksByName(properties.getWebhookName());
+    @Operation(summary = "List Webex webhooks matching the configured names — confirms what's currently registered " +
+            "(the \"messages\" webhook for questions, and the \"attachmentActions\" webhook that powers inline Like/Dislike buttons)")
+    public Map<String, List<WebhookItem>> status() {
+        Map<String, List<WebhookItem>> result = new java.util.LinkedHashMap<>();
+        result.put("messages", webhookService.findWebhooksByName(properties.getWebhookName()));
+        if (properties.isAttachmentActionsWebhookEnabled()) {
+            result.put("attachmentActions", webhookService.findWebhooksByName(properties.getActionsWebhookName()));
+        }
+        return result;
     }
 
     @PostMapping("/resync")
