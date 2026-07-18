@@ -2,6 +2,13 @@ spring:
   application:
     name: rag-project
 
+  # Loads webex.bot-token (and any other secrets) from a separate, git-ignored file so
+  # nothing sensitive sits directly in this tracked application.yml. "optional:" means
+  # startup won't fail if the file is missing (e.g. CI, or when using WEBEX_BOT_TOKEN
+  # as an env var instead) — see config/webex-secrets.yml.example for the template.
+  config:
+    import: "optional:file:./config/webex-secrets.yml"
+
   profiles:
     active: default
 
@@ -162,7 +169,7 @@ springdoc:
 
 # Webex Chatbot Configuration
 webex:
-  bot-token: ${WEBEX_BOT_TOKEN:NTI5ZjA1OGQtYTY4YS00NzU3LThhNTgtOTE1NGRhNGIzZWU0MjRhYTJlMzEtZDcy_PF84_ba052c1a-a74c-48df-aead-18cddd1bffcc}          # get this from https://developer.webex.com/my-apps -> Create a Bot
+  bot-token: ${WEBEX_BOT_TOKEN:}          # set in config/webex-secrets.yml (git-ignored) — see config/webex-secrets.yml.example
   api-base-url: https://webexapis.com/v1
   webhook-secret: ${WEBEX_WEBHOOK_SECRET:}  # optional, but recommended - must match the "secret" used when registering the webhook
   bot-email: ${WEBEX_BOT_EMAIL:msexpert@webex.bot}

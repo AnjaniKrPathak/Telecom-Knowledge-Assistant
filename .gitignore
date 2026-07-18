@@ -24,3 +24,8 @@ target/
 
 ### Mac ###
 .DS_Store
+
+### Secrets ###
+config/webex-secrets.yml
+!config/webex-secrets.yml.example
+application-kimi.yml
