@@ -181,6 +181,30 @@ public class WebexClient {
         }
     }
 
+    /**
+     * GET /v1/rooms — lists every room/space the bot currently belongs to. Used by the
+     * broadcast feature ({@code allKnownRooms: true}) to push a message out to every space
+     * without the caller having to enumerate roomIds by hand. Webex caps page size at 1000,
+     * which is plenty for a bot's rooms in the common case.
+     */
+    public List<com.rag.webex.dto.WebexRoom> getMyRooms() {
+        HttpEntity<Void> request = new HttpEntity<>(authHeaders());
+        try {
+            com.rag.webex.dto.WebexRoom.ListResponse response = webexRestTemplate.exchange(
+                    webexProperties.getApiBaseUrl() + "/rooms?max=1000",
+                    HttpMethod.GET,
+                    request,
+                    com.rag.webex.dto.WebexRoom.ListResponse.class
+            ).getBody();
+            return response != null && response.getItems() != null
+                    ? response.getItems()
+                    : List.of();
+        } catch (RestClientException e) {
+            log.error("Failed to list Webex rooms: {}", e.getMessage(), e);
+            throw e;
+        }
+    }
+
     /** True if this personId belongs to the bot itself (used to avoid the bot replying to itself). */
     public boolean isFromBot(String personId) {
         return botIdentity != null && botIdentity.getId().equals(personId);

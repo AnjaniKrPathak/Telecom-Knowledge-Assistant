@@ -71,4 +71,12 @@ public class WebexProperties {
 
     /** How often (ms) the background scheduler checks whether the ngrok URL changed. */
     private long autoSyncIntervalMs = 60_000;
+
+    // ---- Broadcast (proactive, bot-initiated send to many people/rooms at once) ----
+
+    /**
+     * Small delay (ms) between each send in a broadcast, to stay under Webex's per-second
+     * rate limits when messaging many targets in one request. Set to 0 to disable pacing.
+     */
+    private long broadcastDelayMs = 250;
 }
