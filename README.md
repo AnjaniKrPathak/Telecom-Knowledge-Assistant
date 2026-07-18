@@ -181,6 +181,35 @@ Tunable via `rag.hybrid.*` in `application.yml` (see the Configuration table bel
 
 ---
 
+## Webex Chatbot
+
+The bot answers questions asked in a Webex space via `/api/webex/webhook`, and keeps the space
+engaged instead of going quiet while it works:
+
+1. It immediately posts **"🤔 Thinking about your question..."**
+2. It edits that same message in place as `RagQueryService` moves through its stages —
+   **"🔎 Searching the knowledge base..."** → **"📚 Found N relevant sources — drafting an
+   answer..."** — via Webex's message-edit API (`PUT /v1/messages/{id}`), so the user watches
+   live progress rather than sitting on one long silent wait.
+3. It sends the real answer as an Adaptive Card with inline **👍 Like / 👎 Dislike** buttons
+   (or, for clients that don't render cards, as plain text — reply `👍`/`👎` to rate the last
+   answer instead), then removes the "thinking" placeholder.
+
+Tapping a button (or replying `👍`/`👎`, or "helpful"/"not helpful") fires the existing feedback
+loop — `FeedbackService` records the rating and folds it into future retrieval ranking (see
+`FeedbackService.sourceBoost`) — and the bot follows up asking if you'd like to add a comment.
+
+Set `webex.thinking-status-enabled: false` to skip the placeholder/live-edit step and just send
+one reply, e.g. if edit/delete calls meaningfully count against a rate-limited bot token.
+
+The Webex room id doubles as the conversation-memory session id, so every space automatically
+gets its own running conversation (follow-up questions resolve using history) with zero manual
+setup. Both required webhooks (`messages/created` for questions, `attachmentActions/created` for
+button taps) are kept in sync with your current ngrok URL automatically — no manual Developer
+Portal steps.
+
+---
+
 ## Switching LLM Providers
 
 The chat model is provider-switchable via Spring profiles — no code changes needed. Four
@@ -229,6 +258,9 @@ All settings are in `src/main/resources/application.yml`:
 | `rag.hybrid.rrf-k` | `60` | Reciprocal Rank Fusion smoothing constant |
 | `rag.hybrid.min-vector-score` | `0.5` | Cosine-similarity floor for the vector leg |
 | `rag.hybrid.fts-language` | `english` | Postgres text-search configuration |
+| `webex.thinking-status-enabled` | `true` | Post a "🤔 Thinking..." placeholder and live-edit it (searching/drafting) while the Webex bot works |
+| `webex.attachment-actions-webhook-enabled` | `true` | Send Webex answers as Adaptive Cards with tappable 👍/👎 buttons instead of plain text |
+| `rag.feedback.enabled` | `true` | Toggle whether accumulated thumbs up/down nudge retrieval ranking |
 
 ---
 

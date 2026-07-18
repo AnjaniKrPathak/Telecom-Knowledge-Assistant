@@ -42,7 +42,12 @@ public class RagQueryService {
 
     /** Stateless overload — kept for callers that don't care about conversation memory. */
     public RagResponse query(String question) {
-        return query(question, null);
+        return query(question, null, QueryProgressListener.NOOP);
+    }
+
+    /** Session-aware overload — kept for callers (REST API) that don't need live progress callbacks. */
+    public RagResponse query(String question, String sessionId) {
+        return query(question, sessionId, QueryProgressListener.NOOP);
     }
 
     /**
@@ -51,14 +56,20 @@ public class RagQueryService {
      * second one?" resolve correctly), retrieved chunks are re-ranked using accumulated
      * feedback (see FeedbackService), and both the question and the answer are persisted to
      * conversation memory before returning.
+     * <p>
+     * {@code listener} gets called at each pipeline stage (cache check, retrieval, generation)
+     * so a caller like the Webex bot can show live "thinking → searching → drafting" progress
+     * instead of the room sitting on one long silent wait. Purely observational — it never
+     * changes what gets retrieved or answered.
      *
      * @param sessionId caller-supplied or previously-issued session id; a new one is minted if null/blank
      */
-    public RagResponse query(String question, String sessionId) {
+    public RagResponse query(String question, String sessionId, QueryProgressListener listener) {
         String effectiveSessionId = (sessionId == null || sessionId.isBlank())
                 ? conversationMemoryService.newSessionId()
                 : sessionId;
         log.info("RAG query [session={}]: {}", effectiveSessionId, question);
+        listener.onCacheChecking();
 
         boolean isFollowUp = memoryProperties.isEnabled() && conversationMemoryService.hasHistory(effectiveSessionId);
         conversationMemoryService.addUserMessage(effectiveSessionId, question);
@@ -72,11 +83,13 @@ public class RagQueryService {
         if (!isFollowUp) {
             Optional<RagResponse> cached = queryCacheService.get(question);
             if (cached.isPresent()) {
+                listener.onCacheHit();
                 return finalizeCachedResponse(cached.get(), effectiveSessionId);
             }
         }
 
         // 1. Embed the question
+        listener.onSearching();
         Embedding questionEmbedding = embeddingModel.embed(question).content();
 
         // 2. Retrieve candidates from pgvector. When reranking is on, cast a wider net
@@ -126,6 +139,7 @@ public class RagQueryService {
         String prompt = buildPrompt(question, context, history);
 
         // 5. Generate answer using llama3
+        listener.onGenerating(matches.size());
         Response<AiMessage> response = chatLanguageModel.generate(UserMessage.from(prompt));
         String answer = response.content().text();
         log.info("Generated answer (length={})", answer.length());
@@ -217,4 +231,25 @@ public class RagQueryService {
                                String sessionId, String interactionId) {}
 
     public record SourceReference(String source, String type, double score, String excerpt) {}
+
+    /**
+     * Staged progress callback so a caller (the Webex bot) can show live "thinking → searching
+     * → drafting" status instead of one long silent wait. All methods are default no-ops;
+     * implement only the stages you want to react to. Purely observational.
+     */
+    public interface QueryProgressListener {
+        QueryProgressListener NOOP = new QueryProgressListener() {};
+
+        /** About to check the query cache (the very first thing a fresh turn does). */
+        default void onCacheChecking() {}
+
+        /** A cached answer was found and is being returned as-is — no retrieval/generation ran. */
+        default void onCacheHit() {}
+
+        /** About to embed the question and search the vector store. */
+        default void onSearching() {}
+
+        /** Retrieval (+ reranking + feedback ranking) is done; about to call the LLM to draft the answer. */
+        default void onGenerating(int sourceCount) {}
+    }
 }

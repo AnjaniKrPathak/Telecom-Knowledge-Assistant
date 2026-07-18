@@ -57,6 +57,15 @@ public class WebexProperties {
     /** Master switch for inline Like/Dislike buttons. When false, only the "messages" webhook is managed and feedback stays reply-text-only ("👍"/"👎"). */
     private boolean attachmentActionsWebhookEnabled = true;
 
+    /**
+     * When true, the bot posts a "🤔 Thinking..." placeholder and edits it in place
+     * ("🔎 Searching...", "📚 Drafting...") while RagQueryService works, so the space shows live
+     * progress instead of sitting silent until the answer is ready. The placeholder is deleted
+     * once the real answer/card is sent. Set false to go back to a single reply with no interim
+     * status message (e.g. if edit/delete calls count meaningfully against a rate-limited bot).
+     */
+    private boolean thinkingStatusEnabled = true;
+
     /** Whether to periodically re-check the ngrok URL after startup and re-sync automatically. */
     private boolean autoSyncEnabled = true;
 

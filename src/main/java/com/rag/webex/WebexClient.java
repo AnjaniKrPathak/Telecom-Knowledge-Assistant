@@ -122,6 +122,48 @@ public class WebexClient {
         ).getBody();
     }
 
+    /**
+     * PUT /v1/messages/{id} — edits a message's text in place. Used to turn a single
+     * "🤔 Thinking..." placeholder into a live status line ("🔎 Searching...", "📚 Drafting...")
+     * as the RAG pipeline progresses, instead of the room sitting on one long silent wait.
+     */
+    public WebexMessage editMessage(String messageId, String roomId, String text) {
+        Map<String, Object> body = new HashMap<>();
+        body.put("roomId", roomId);
+        body.put("markdown", text);
+
+        HttpHeaders headers = authHeaders();
+        headers.setContentType(MediaType.APPLICATION_JSON);
+        HttpEntity<Map<String, Object>> request = new HttpEntity<>(body, headers);
+
+        try {
+            return webexRestTemplate.exchange(
+                    webexProperties.getApiBaseUrl() + "/messages/" + messageId,
+                    HttpMethod.PUT,
+                    request,
+                    WebexMessage.class
+            ).getBody();
+        } catch (RestClientException e) {
+            log.warn("Failed to edit Webex message {}: {}", messageId, e.getMessage());
+            throw e;
+        }
+    }
+
+    /** DELETE /v1/messages/{id} — removes the "thinking..." placeholder once the real answer/card has been sent. */
+    public void deleteMessage(String messageId) {
+        HttpEntity<Void> request = new HttpEntity<>(authHeaders());
+        try {
+            webexRestTemplate.exchange(
+                    webexProperties.getApiBaseUrl() + "/messages/" + messageId,
+                    HttpMethod.DELETE,
+                    request,
+                    Void.class
+            );
+        } catch (RestClientException e) {
+            log.debug("Could not delete Webex placeholder message {}: {}", messageId, e.getMessage());
+        }
+    }
+
     private WebexMessage postMessage(Map<String, Object> body) {
         HttpHeaders headers = authHeaders();
         headers.setContentType(MediaType.APPLICATION_JSON);

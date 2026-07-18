@@ -144,6 +144,7 @@ webex:
   remove-duplicate-webhooks: true          # if multiple webhooks share webhook-name, delete all but the oldest
   actions-webhook-name: SpringBootWebhookActions  # 2nd webhook (attachmentActions/created) powering inline Like/Dislike buttons
   attachment-actions-webhook-enabled: true  # send answers as Adaptive Cards with tappable Like/Dislike buttons instead of plain text
+  thinking-status-enabled: true             # post a "🤔 Thinking..." placeholder and live-edit it (searching/drafting) while the answer is generated
   auto-sync-enabled: true                  # keep checking for ngrok URL changes after startup (not just once)
   auto-sync-interval-ms: 60000             # how often (ms) the background scheduler checks for a changed ngrok URL
 
