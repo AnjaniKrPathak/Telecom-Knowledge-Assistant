@@ -120,11 +120,13 @@ public class ExcelStructuredChunker {
         text.append("Sheet: ").append(sheetName).append('\n');
         text.append(rowStart == rowEnd ? "Row: " + rowStart : "Rows: " + rowStart + "-" + rowEnd).append('\n');
 
+        List<Map<String, String>> rowValuesList = new ArrayList<>(group.size());
         for (Row row : group) {
             if (group.size() > 1) {
                 text.append("Row ").append(row.getRowNum() + 1).append(":\n");
             }
             Map<String, String> values = rowToColumnMap(row, headers);
+            rowValuesList.add(values);
             values.forEach((column, value) -> {
                 if (!value.isEmpty()) {
                     text.append("  ").append(column).append(": ").append(value).append('\n');
@@ -143,7 +145,53 @@ public class ExcelStructuredChunker {
             metadata.put("headers", headerSummary);
         }
 
+        // Surface configured business columns (rag.excel.business-fields) directly as metadata —
+        // e.g. "Offering Name" -> offeringName, "Flat Offering ID" -> flatOfferingId — so
+        // retrieval can filter/debug on them precisely instead of relying only on
+        // full-text/vector matching against the rendered row text.
+        extractBusinessFields(rowValuesList).forEach(metadata::put);
+
         return TextSegment.from(text.toString().trim(), metadata);
+    }
+
+    /**
+     * Looks up each configured business column (case-insensitive, whitespace-tolerant header
+     * match) across every row in this chunk's group and returns the first non-blank value found
+     * for each, keyed by its configured metadata name (rag.excel.business-fields).
+     */
+    private Map<String, String> extractBusinessFields(List<Map<String, String>> rowValuesList) {
+        Map<String, String> businessFields = properties.getBusinessFields();
+        if (businessFields == null || businessFields.isEmpty()) {
+            return Map.of();
+        }
+        Map<String, String> result = new LinkedHashMap<>();
+        for (Map.Entry<String, String> field : businessFields.entrySet()) {
+            String headerName = field.getKey();
+            String metadataKey = field.getValue();
+            if (metadataKey == null || metadataKey.isBlank()) {
+                continue;
+            }
+            for (Map<String, String> rowValues : rowValuesList) {
+                String value = findValueIgnoreCase(rowValues, headerName);
+                if (value != null && !value.isBlank()) {
+                    result.put(metadataKey, value);
+                    break;
+                }
+            }
+        }
+        return result;
+    }
+
+    private String findValueIgnoreCase(Map<String, String> rowValues, String headerName) {
+        if (headerName == null) {
+            return null;
+        }
+        for (Map.Entry<String, String> entry : rowValues.entrySet()) {
+            if (entry.getKey() != null && entry.getKey().trim().equalsIgnoreCase(headerName.trim())) {
+                return entry.getValue();
+            }
+        }
+        return null;
     }
 
     // ── Row / header helpers ─────────────────────────────────────────────────

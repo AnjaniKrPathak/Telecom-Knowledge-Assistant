@@ -78,6 +78,12 @@ rag:
     header-detection: true    # use the first non-blank row of each sheet as column headers
     max-cell-length: 2000     # truncate any single cell's text beyond this many characters
     skip-blank-rows: true     # don't create chunks for fully empty rows
+    business-fields:          # spreadsheet column header -> metadata key, copied onto every
+      "Offering Name": offeringName        # chunk built from a row that has that column, so
+      "Flat Offering ID": flatOfferingId    # retrieval/debugging can key off these directly
+      "Offering ID": offeringId             # instead of only full-text/vector matching
+      "External ID": externalId
+      "TUTI": tuti
   git:
     workspace-dir: ./git-workspace    # local clone location (one subfolder per connected repo)
     compute-diff-stats: true          # compute insertions/deletions/files-changed per commit
@@ -106,6 +112,31 @@ rag:
     min-votes-for-adjustment: 1 # a source needs at least this many net votes before it's nudged
     webex-text-shortcuts-enabled: true  # let Webex users reply thumbs up/down to rate the bot's last answer
     webex-comment-prompt-ttl-minutes: 5  # how long the bot waits for an optional comment after a Webex rating
+  query-routing:
+    enabled: true             # filter retrieval to one document type based on question keywords
+    excel-keywords:           # if the question contains any of these, only type=EXCEL chunks are searched
+      - "flat offering"
+      - "offering id"
+      - "offering name"
+      - "external id"
+      - "Relation Id"
+      - "rule id"
+      - "Discount Id"
+      - "Price Key"
+      - "Relation Id"
+      - "Offering Template"
+      - "Design Task"
+      - "Find"
+    docx-keywords:            # checked only if no excel-keyword matched; filters to type=DOCX
+      - "what is"
+      - "what are"
+      - "how does"
+      - "how do"
+      - "how is"
+      - "explain"
+      - "why does"
+      - "why is"
+      - "describe"
   reranker:
     enabled: true              # rerank retrieved chunks for more accurate context before answering
     provider: huggingface      # huggingface | llm | none

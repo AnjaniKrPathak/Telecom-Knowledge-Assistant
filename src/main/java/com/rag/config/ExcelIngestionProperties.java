@@ -4,6 +4,9 @@ import lombok.Data;
 import org.springframework.boot.context.properties.ConfigurationProperties;
 import org.springframework.context.annotation.Configuration;
 
+import java.util.LinkedHashMap;
+import java.util.Map;
+
 /**
  * Binds the "rag.excel.*" properties from application.yml.
  * <p>
@@ -20,6 +23,12 @@ import org.springframework.context.annotation.Configuration;
  *     header-detection: true   # use the first non-blank row of each sheet as column headers
  *     max-cell-length: 2000    # truncate any single cell's text beyond this many characters
  *     skip-blank-rows: true    # don't create chunks for rows where every cell is empty
+ *     business-fields:         # spreadsheet column header -> metadata key, surfaced on every
+ *       "Offering Name": offeringName      # chunk built from a row that has that column, so
+ *       "Flat Offering ID": flatOfferingId # retrieval/debugging can key off these directly
+ *       "Offering ID": offeringId          # instead of only full-text/vector matching.
+ *       "External ID": externalId
+ *       "TUTI": tuti
  * </pre>
  */
 @Configuration
@@ -47,4 +56,21 @@ public class ExcelIngestionProperties {
 
     /** Rows where every cell is blank are skipped instead of producing an empty chunk. */
     private boolean skipBlankRows = true;
+
+    /**
+     * Maps a spreadsheet column header (matched case-insensitively, whitespace-trimmed) to the
+     * metadata key its value should be stored under — e.g. "Flat Offering ID" -&gt; "flatOfferingId".
+     * Every configured column that's present (and non-blank) in a chunk's row(s) gets copied
+     * straight into that chunk's {@link dev.langchain4j.data.document.Metadata}, so retrieval can
+     * filter/debug on business identifiers precisely, instead of relying only on
+     * full-text/vector matching. Populated with sensible telecom-offering defaults below —
+     * override or add to this map in application.yml for any other column you rely on.
+     */
+    private Map<String, String> businessFields = new LinkedHashMap<>(Map.of(
+            "Offering Name", "offeringName",
+            "Flat Offering ID", "flatOfferingId",
+            "Offering ID", "offeringId",
+            "External ID", "externalId",
+            "TUTI", "tuti"
+    ));
 }

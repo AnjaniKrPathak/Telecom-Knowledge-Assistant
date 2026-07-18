@@ -2,6 +2,7 @@ package com.rag.service;
 
 import com.rag.config.ConversationMemoryProperties;
 import com.rag.config.RerankerProperties;
+import com.rag.search.QueryTypeClassifier;
 import dev.langchain4j.data.embedding.Embedding;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.UserMessage;
@@ -22,6 +23,8 @@ import java.util.List;
 import java.util.Optional;
 import java.util.stream.Collectors;
 
+import static dev.langchain4j.store.embedding.filter.MetadataFilterBuilder.metadataKey;
+
 @Slf4j
 @Service
 @RequiredArgsConstructor
@@ -36,6 +39,7 @@ public class RagQueryService {
     private final FeedbackService feedbackService;
     private final RerankerService rerankerService;
     private final RerankerProperties rerankerProperties;
+    private final QueryTypeClassifier queryTypeClassifier;
 
     @Value("${rag.max-results}")
     private int maxResults;
@@ -99,24 +103,43 @@ public class RagQueryService {
                 ? Math.max(rerankerProperties.getCandidatePoolSize(), maxResults)
                 : maxResults;
 
-        EmbeddingSearchRequest searchRequest = EmbeddingSearchRequest.builder()
+        // 2a. Metadata pre-filter — if the question clearly reads as a structured-data lookup
+        // ("Flat Offering", "Offering ID", "External ID", "TUTI"...) or as narrative documentation
+        // ("What is...", "How does...", "Explain..."), narrow the vector search to just that
+        // document type instead of searching across everything. See QueryTypeClassifier.
+        Optional<String> typeFilter = queryTypeClassifier.classify(question);
+
+        var searchRequestBuilder = EmbeddingSearchRequest.builder()
                 .queryEmbedding(questionEmbedding)
                 .maxResults(fetchSize)
-                .minScore(0.5)
-                .build();
+                .minScore(0.5);
+        typeFilter.ifPresent(type -> searchRequestBuilder.filter(metadataKey("type").isEqualTo(type)));
 
-        List<EmbeddingMatch<TextSegment>> matches = embeddingStore.search(searchRequest).matches();
-        log.info("Retrieved {} candidate chunks (fetchSize={})", matches.size(), fetchSize);
+        List<EmbeddingMatch<TextSegment>> matches = embeddingStore.search(searchRequestBuilder.build()).matches();
+        log.info("Retrieved {} candidate chunks (fetchSize={}, typeFilter={})",
+                matches.size(), fetchSize, typeFilter.orElse("none"));
 
-        // 2a. Cross-encoder / LLM reranking — reorders by actual relevance to the question,
+        // Fallback: a type filter that returns nothing (misclassified question, or that type
+        // genuinely has no relevant content) shouldn't dead-end the query — retry unfiltered.
+        if (matches.isEmpty() && typeFilter.isPresent()) {
+            log.info("No matches for type={} filter — falling back to unfiltered search", typeFilter.get());
+            EmbeddingSearchRequest fallbackRequest = EmbeddingSearchRequest.builder()
+                    .queryEmbedding(questionEmbedding)
+                    .maxResults(fetchSize)
+                    .minScore(0.5)
+                    .build();
+            matches = embeddingStore.search(fallbackRequest).matches();
+        }
+
+        // 2b. Cross-encoder / LLM reranking — reorders by actual relevance to the question,
         // which vector cosine-similarity alone often gets wrong for nuanced queries.
         matches = rerankerService.rerank(question, matches);
 
-        // 2b. Feedback-aware re-ranking — nudge chunks from historically thumbs-up'd sources
+        // 2c. Feedback-aware re-ranking — nudge chunks from historically thumbs-up'd sources
         // up, and thumbs-down'd sources down, before building the context/answer.
         matches = applyFeedbackRanking(matches);
 
-        // 2c. Trim down to the final context size now that reranking + feedback have both had a say.
+        // 2d. Trim down to the final context size now that reranking + feedback have both had a say.
         if (matches.size() > maxResults) {
             matches = matches.subList(0, maxResults);
         }
@@ -144,13 +167,16 @@ public class RagQueryService {
         String answer = response.content().text();
         log.info("Generated answer (length={})", answer.length());
 
-        // 6. Build source references
+        // 6. Build source references — includes structured metadata (sheet/row, business fields
+        // like offeringName/flatOfferingId/externalId/tuti when present) so it's obvious from the
+        // response alone WHY a given chunk was retrieved, without cross-referencing the source file.
         List<SourceReference> sources = matches.stream()
                 .map(match -> new SourceReference(
                         match.embedded().metadata().getString("source"),
                         match.embedded().metadata().getString("type"),
                         match.score(),
-                        match.embedded().text().substring(0, Math.min(200, match.embedded().text().length())) + "..."
+                        match.embedded().text().substring(0, Math.min(200, match.embedded().text().length())) + "...",
+                        extractDebugMetadata(match.embedded().metadata())
                 ))
                 .collect(Collectors.toList());
 
@@ -230,7 +256,30 @@ public class RagQueryService {
     public record RagResponse(String question, String answer, List<SourceReference> sources,
                                String sessionId, String interactionId) {}
 
-    public record SourceReference(String source, String type, double score, String excerpt) {}
+    public record SourceReference(String source, String type, double score, String excerpt,
+                                   java.util.Map<String, String> metadata) {}
+
+    /**
+     * Pulls the metadata keys worth surfacing for debugging retrieval — structural (sheet, rows)
+     * and any of the configured business fields (offeringName, flatOfferingId, externalId, tuti,
+     * ...) that ExcelStructuredChunker put on this chunk — so it's visible in the response why a
+     * given row was matched, instead of having to go dig through the source spreadsheet.
+     */
+    private java.util.Map<String, String> extractDebugMetadata(dev.langchain4j.data.document.Metadata metadata) {
+        java.util.Map<String, String> debug = new java.util.LinkedHashMap<>();
+        for (String key : DEBUG_METADATA_KEYS) {
+            String value = metadata.getString(key);
+            if (value != null && !value.isBlank()) {
+                debug.put(key, value);
+            }
+        }
+        return debug;
+    }
+
+    private static final List<String> DEBUG_METADATA_KEYS = List.of(
+            "workbook", "sheet", "rowStart", "rowEnd",
+            "offeringName", "flatOfferingId", "offeringId", "externalId", "tuti"
+    );
 
     /**
      * Staged progress callback so a caller (the Webex bot) can show live "thinking → searching
