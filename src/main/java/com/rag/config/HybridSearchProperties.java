@@ -22,13 +22,18 @@ public class HybridSearchProperties {
 
     /** Master switch. When false, RagQueryService falls back to pure vector search. */
     private boolean enabled = true;
-
     /**
      * How many candidates to pull from EACH retriever (vector + keyword) relative to the
      * final top-k the caller wants, e.g. topK=5 and multiplier=4 -> 20 candidates per leg
      * before fusion narrows it back down to 5. A wider candidate pool improves fusion quality.
      */
     private int candidateMultiplier = 4;
+
+    /**
+     * How many candidates to pull from EACH retriever (vector + keyword) relative to the
+     * final top-k the caller wants, e.g. topK=5 and multiplier=4 -> 20 candidates per leg
+     * before fusion narrows it back down to 5. A wider candidate pool improves fusion quality.
+     */
 
     /** Reciprocal Rank Fusion constant. Higher values flatten the influence of rank position. */
     private int rrfK = 60;
@@ -47,4 +52,7 @@ public class HybridSearchProperties {
 
     /** How often the cached corpus-wide BM25 statistics (N, avgdl) are refreshed, in milliseconds. */
     private long statsRefreshIntervalMs = 300_000;
+
+
+
 }

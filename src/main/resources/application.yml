@@ -85,6 +85,7 @@ rag:
     header-detection: true    # use the first non-blank row of each sheet as column headers
     max-cell-length: 2000     # truncate any single cell's text beyond this many characters
     skip-blank-rows: true     # don't create chunks for fully empty rows
+    range-validation-enabled: true  # flag an ID whose value falls outside its sheet's documented range
     business-fields:          # spreadsheet column header -> metadata key, copied onto every
       "Offering Name": offeringName        # chunk built from a row that has that column, so
       "Flat Offering ID": flatOfferingId    # retrieval/debugging can key off these directly

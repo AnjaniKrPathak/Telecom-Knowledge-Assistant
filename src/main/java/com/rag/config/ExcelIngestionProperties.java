@@ -58,6 +58,15 @@ public class ExcelIngestionProperties {
     private boolean skipBlankRows = true;
 
     /**
+     * When true (default), a row's identifier value is checked against its sheet's own documented
+     * reserved-ID range (an "X range: NNNNNNNN[-MMMMMMMM]" note found in a header cell — see
+     * {@link com.rag.document.excel.ExcelCatalogFields#parseIdRangeHints}) and flagged with a
+     * {@code *RangeWarning} metadata entry when it falls outside that range. Set to false to skip
+     * this check entirely (the range hints are still parsed and stamped either way).
+     */
+    private boolean rangeValidationEnabled = true;
+
+    /**
      * Maps a spreadsheet column header (matched case-insensitively, whitespace-trimmed) to the
      * metadata key its value should be stored under — e.g. "Flat Offering ID" -&gt; "flatOfferingId".
      * Every configured column that's present (and non-blank) in a chunk's row(s) gets copied
