@@ -17,9 +17,11 @@ import org.springframework.stereotype.Component;
 import java.io.IOException;
 import java.io.InputStream;
 import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Set;
 
 /**
  * Turns a spreadsheet into a list of {@link TextSegment}s that preserve its structure —
@@ -32,10 +34,23 @@ import java.util.Map;
  *   <li>Human-readable text rendered as "{@code Header: Value}" pairs, prefixed with the
  *       workbook/sheet/row it came from — so both the embedding model and the keyword (BM25)
  *       index can match on column names and cell values directly.</li>
- *   <li>Structured metadata ({@code workbook}, {@code sheet}, {@code rowStart}, {@code rowEnd},
- *       {@code headers}) so retrieval and citations can answer questions like "which sheet
- *       contains Product Mapping?" or "where is error code XYZ defined?" precisely, instead of
- *       pointing only at a filename.</li>
+ *   <li>Structured metadata: {@code source}, {@code type}, {@code category}, {@code workbook},
+ *       {@code sheet}, {@code sheetType} (a canonical tab-name-derived category — see
+ *       {@link ExcelSheetType} — e.g. "offering", "optionalOffering", "refill",
+ *       "relationsOverride", "characteristicsOverride", "priceListItem", "complexFlatRule",
+ *       "discount", "rule"), {@code rowStart}, {@code rowEnd}, plus — whenever the sheet's header
+ *       row matches one of the recognized synonyms (see {@link ExcelCatalogFields}) — canonical
+ *       catalog-identifier fields: {@code offeringName}, {@code externalId},
+ *       {@code flatOfferingId}, {@code changeRequestId}, {@code bundleId}, {@code bundleName},
+ *       {@code tariffName}, {@code discountId}, {@code discountName}, {@code ruleId},
+ *       {@code ruleName}, {@code relationId}, and {@code tabHeader} (the sheet's full header-row
+ *       summary, for debugging), plus any column configured via {@code rag.excel.business-fields}
+ *       (e.g. {@code tuti}) or generically auto-detected as an *Id/*Name/*Key/*Code column not
+ *       already covered by either mechanism (see {@link ExcelCatalogFields#matchConfiguredFields}
+ *       and {@link ExcelCatalogFields#matchDynamicHeaders}). This lets retrieval and citations
+ *       answer questions like "which sheet contains Product Mapping?", "what's the Offering Id
+ *       for CR-1029?", or "where is discount D-4521 defined?" precisely — filtering/matching on
+ *       the actual business identifier, not just a filename.</li>
  * </ol>
  * Row numbers in both the text and the metadata are 1-based to match what a user sees in Excel.
  */
@@ -91,6 +106,39 @@ public class ExcelStructuredChunker {
         }
         List<String> headers = buildHeaders(headerRow);
         String headerSummary = String.join(", ", headers);
+        Map<String, Integer> catalogFieldColumns = ExcelCatalogFields.matchHeaders(headers);
+        if (!catalogFieldColumns.isEmpty()) {
+            log.debug("Sheet '{}': matched known catalog fields {} to header columns", sheetName, catalogFieldColumns.keySet());
+        }
+        // Configured business fields (rag.excel.business-fields) — for columns not already claimed
+        // by a known alias above, e.g. "TUTI" -> tuti. Lets ops add support for a new business
+        // field via application.yml alone, with no code change.
+        Map<String, Integer> configuredFieldColumns = ExcelCatalogFields.matchConfiguredFields(
+                headers, properties.getBusinessFields(), new HashSet<>(catalogFieldColumns.values()));
+        if (!configuredFieldColumns.isEmpty()) {
+            log.debug("Sheet '{}': matched configured business fields {} to header columns", sheetName, configuredFieldColumns.keySet());
+        }
+        // Generic fallback: any remaining *Id/*Name/*Key/*Code-looking column (not already claimed
+        // above) gets captured automatically under a key derived from its own header text — this is
+        // what lets a brand-new sheet's identifier columns get picked up without a code change.
+        Set<Integer> claimedSoFar = new HashSet<>(catalogFieldColumns.values());
+        claimedSoFar.addAll(configuredFieldColumns.values());
+        Map<String, Integer> dynamicFieldColumns = ExcelCatalogFields.matchDynamicHeaders(headers, claimedSoFar);
+        if (!dynamicFieldColumns.isEmpty()) {
+            log.debug("Sheet '{}': auto-detected identifier-like columns {} (no alias needed)", sheetName, dynamicFieldColumns.keySet());
+        }
+        Map<String, Integer> allFieldColumns = new LinkedHashMap<>(catalogFieldColumns);
+        allFieldColumns.putAll(configuredFieldColumns);
+        allFieldColumns.putAll(dynamicFieldColumns);
+
+        // Reserved-ID-block notes ("Rule ID range: 71320000") some sheets carry in a header cell —
+        // parsed once per sheet and stamped onto every chunk from this sheet as documentation/
+        // debugging context (see ExcelCatalogFields.parseIdRangeHints for details).
+        Map<String, String> idRangeHints = ExcelCatalogFields.parseIdRangeHints(headers);
+        String idRangeNote = ExcelCatalogFields.extractRawIdRangeNote(headers);
+        if (!idRangeHints.isEmpty()) {
+            log.debug("Sheet '{}': found reserved ID-range note(s): {}", sheetName, idRangeNote);
+        }
 
         // 2. Collect data rows (skipping blank ones if configured), then group into chunks.
         List<Row> dataRows = new ArrayList<>();
@@ -105,13 +153,16 @@ public class ExcelStructuredChunker {
         int groupSize = Math.max(properties.getRowsPerChunk(), 1);
         for (int i = 0; i < dataRows.size(); i += groupSize) {
             List<Row> group = dataRows.subList(i, Math.min(i + groupSize, dataRows.size()));
-            segments.add(buildChunk(source, workbookLabel, sheetName, headers, headerSummary, group));
+            segments.add(buildChunk(source, workbookLabel, sheetName, headers, headerSummary, group,
+                    allFieldColumns, idRangeHints, idRangeNote));
         }
         return segments;
     }
 
     private TextSegment buildChunk(String source, String workbookLabel, String sheetName,
-                                    List<String> headers, String headerSummary, List<Row> group) {
+                                    List<String> headers, String headerSummary, List<Row> group,
+                                    Map<String, Integer> fieldColumns,
+                                    Map<String, String> idRangeHints, String idRangeNote) {
         int rowStart = group.get(0).getRowNum() + 1;   // 1-based, matches Excel's UI
         int rowEnd = group.get(group.size() - 1).getRowNum() + 1;
 
@@ -120,13 +171,11 @@ public class ExcelStructuredChunker {
         text.append("Sheet: ").append(sheetName).append('\n');
         text.append(rowStart == rowEnd ? "Row: " + rowStart : "Rows: " + rowStart + "-" + rowEnd).append('\n');
 
-        List<Map<String, String>> rowValuesList = new ArrayList<>(group.size());
         for (Row row : group) {
             if (group.size() > 1) {
                 text.append("Row ").append(row.getRowNum() + 1).append(":\n");
             }
             Map<String, String> values = rowToColumnMap(row, headers);
-            rowValuesList.add(values);
             values.forEach((column, value) -> {
                 if (!value.isEmpty()) {
                     text.append("  ").append(column).append(": ").append(value).append('\n');
@@ -136,62 +185,45 @@ public class ExcelStructuredChunker {
 
         Metadata metadata = Metadata.from("source", source)
                 .put("type", "EXCEL")
+                .put("category", com.rag.document.DocumentCategoryClassifier.CATALOG)
                 .put("workbook", workbookLabel)
                 .put("sheet", sheetName)
+                .put("sheetType", ExcelSheetType.classify(sheetName))
                 .put("rowStart", String.valueOf(rowStart))
-                .put("rowEnd", String.valueOf(rowEnd))
-                .put("chunkKind", group.size() > 1 ? "EXCEL_ROWS" : "EXCEL_ROW");
-        if (!headerSummary.isBlank()) {
-            metadata.put("headers", headerSummary);
-        }
+                .put("rowEnd", String.valueOf(rowEnd));
 
-        // Surface configured business columns (rag.excel.business-fields) directly as metadata —
-        // e.g. "Offering Name" -> offeringName, "Flat Offering ID" -> flatOfferingId — so
-        // retrieval can filter/debug on them precisely instead of relying only on
-        // full-text/vector matching against the rendered row text.
-        extractBusinessFields(rowValuesList).forEach(metadata::put);
-
-        return TextSegment.from(text.toString().trim(), metadata);
-    }
-
-    /**
-     * Looks up each configured business column (case-insensitive, whitespace-tolerant header
-     * match) across every row in this chunk's group and returns the first non-blank value found
-     * for each, keyed by its configured metadata name (rag.excel.business-fields).
-     */
-    private Map<String, String> extractBusinessFields(List<Map<String, String>> rowValuesList) {
-        Map<String, String> businessFields = properties.getBusinessFields();
-        if (businessFields == null || businessFields.isEmpty()) {
-            return Map.of();
-        }
-        Map<String, String> result = new LinkedHashMap<>();
-        for (Map.Entry<String, String> field : businessFields.entrySet()) {
-            String headerName = field.getKey();
-            String metadataKey = field.getValue();
-            if (metadataKey == null || metadataKey.isBlank()) {
-                continue;
-            }
-            for (Map<String, String> rowValues : rowValuesList) {
-                String value = findValueIgnoreCase(rowValues, headerName);
-                if (value != null && !value.isBlank()) {
-                    result.put(metadataKey, value);
+        // Structured catalog-identifier fields — both known aliases (chunkSheet() via
+        // ExcelCatalogFields.matchHeaders()) and generically auto-detected *Id/*Name/*Key/*Code
+        // columns (via ExcelCatalogFields.matchDynamicHeaders()) — extracted here per row-group.
+        // If a group spans multiple rows, the first row with a non-blank value for a given field wins.
+        for (Map.Entry<String, Integer> fieldColumn : fieldColumns.entrySet()) {
+            String field = fieldColumn.getKey();
+            int columnIndex = fieldColumn.getValue();
+            for (Row row : group) {
+                Cell cell = row.getCell(columnIndex);
+                String value = cell == null ? "" : getCellValue(cell).trim();
+                if (!value.isEmpty()) {
+                    metadata.put(field, value);
                     break;
                 }
             }
         }
-        return result;
-    }
 
-    private String findValueIgnoreCase(Map<String, String> rowValues, String headerName) {
-        if (headerName == null) {
-            return null;
+        // Header-row summary for this sheet — kept on every chunk (not just the header row itself)
+        // so a retrieved chunk is self-describing for debugging: which columns it came from, without
+        // a second lookup back to the source workbook.
+        if (!headerSummary.isBlank()) {
+            metadata.put(ExcelCatalogFields.TAB_HEADER, headerSummary);
         }
-        for (Map.Entry<String, String> entry : rowValues.entrySet()) {
-            if (entry.getKey() != null && entry.getKey().trim().equalsIgnoreCase(headerName.trim())) {
-                return entry.getValue();
-            }
+
+        // Reserved-ID-block context, if this sheet documented one — e.g. ruleIdRangeStart=71320000 —
+        // plus the raw note text verbatim, for spotting a misassigned/miscategorized ID at a glance.
+        idRangeHints.forEach(metadata::put);
+        if (idRangeNote != null && !idRangeNote.isBlank()) {
+            metadata.put(ExcelCatalogFields.ID_RANGE_NOTE, idRangeNote);
         }
-        return null;
+
+        return TextSegment.from(text.toString().trim(), metadata);
     }
 
     // ── Row / header helpers ─────────────────────────────────────────────────

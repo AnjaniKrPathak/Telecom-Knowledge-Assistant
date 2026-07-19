@@ -1,8 +1,13 @@
 package com.rag.service;
 
 import com.rag.config.ConversationMemoryProperties;
+import com.rag.config.IntentRoutingProperties;
 import com.rag.config.RerankerProperties;
-import com.rag.search.QueryTypeClassifier;
+import com.rag.document.DocumentCategoryClassifier;
+import com.rag.document.excel.ExcelCatalogFields;
+import com.rag.query.IntentDetectionService;
+import com.rag.query.QueryIntent;
+import dev.langchain4j.data.document.Metadata;
 import dev.langchain4j.data.embedding.Embedding;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.UserMessage;
@@ -13,13 +18,16 @@ import dev.langchain4j.model.output.Response;
 import dev.langchain4j.store.embedding.EmbeddingMatch;
 import dev.langchain4j.store.embedding.EmbeddingSearchRequest;
 import dev.langchain4j.store.embedding.EmbeddingStore;
+import dev.langchain4j.store.embedding.filter.Filter;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Collectors;
 
@@ -39,7 +47,8 @@ public class RagQueryService {
     private final FeedbackService feedbackService;
     private final RerankerService rerankerService;
     private final RerankerProperties rerankerProperties;
-    private final QueryTypeClassifier queryTypeClassifier;
+    private final IntentDetectionService intentDetectionService;
+    private final IntentRoutingProperties intentRoutingProperties;
 
     @Value("${rag.max-results}")
     private int maxResults;
@@ -96,6 +105,14 @@ public class RagQueryService {
         listener.onSearching();
         Embedding questionEmbedding = embeddingModel.embed(question).content();
 
+        // 1a. Classify intent — LOOKUP (Offering Name / Flat Offering ID / External ID / CR ID /
+        // Product ID / Service ID, ...) is answered from the Excel-derived catalog chunks only;
+        // EXPLANATION ("what is X", "explain Y", "how does Z work") is answered from the
+        // DOCX-derived narrative chunks (FDS/BRD/rules) only. See IntentDetectionService and
+        // DocumentCategoryClassifier for how questions/chunks are classified.
+        QueryIntent intent = intentDetectionService.detect(question);
+        log.info("Detected intent={} for question: {}", intent, question);
+
         // 2. Retrieve candidates from pgvector. When reranking is on, cast a wider net
         // (rag.reranker.candidate-pool-size) so the reranker has real choices to make, then trim
         // down to rag.max-results after reranking + feedback-boosting below.
@@ -103,43 +120,18 @@ public class RagQueryService {
                 ? Math.max(rerankerProperties.getCandidatePoolSize(), maxResults)
                 : maxResults;
 
-        // 2a. Metadata pre-filter — if the question clearly reads as a structured-data lookup
-        // ("Flat Offering", "Offering ID", "External ID", "TUTI"...) or as narrative documentation
-        // ("What is...", "How does...", "Explain..."), narrow the vector search to just that
-        // document type instead of searching across everything. See QueryTypeClassifier.
-        Optional<String> typeFilter = queryTypeClassifier.classify(question);
+        List<EmbeddingMatch<TextSegment>> matches = searchByIntent(questionEmbedding, fetchSize, intent);
+        log.info("Retrieved {} candidate chunks (fetchSize={}, intent={})", matches.size(), fetchSize, intent);
 
-        var searchRequestBuilder = EmbeddingSearchRequest.builder()
-                .queryEmbedding(questionEmbedding)
-                .maxResults(fetchSize)
-                .minScore(0.5);
-        typeFilter.ifPresent(type -> searchRequestBuilder.filter(metadataKey("type").isEqualTo(type)));
-
-        List<EmbeddingMatch<TextSegment>> matches = embeddingStore.search(searchRequestBuilder.build()).matches();
-        log.info("Retrieved {} candidate chunks (fetchSize={}, typeFilter={})",
-                matches.size(), fetchSize, typeFilter.orElse("none"));
-
-        // Fallback: a type filter that returns nothing (misclassified question, or that type
-        // genuinely has no relevant content) shouldn't dead-end the query — retry unfiltered.
-        if (matches.isEmpty() && typeFilter.isPresent()) {
-            log.info("No matches for type={} filter — falling back to unfiltered search", typeFilter.get());
-            EmbeddingSearchRequest fallbackRequest = EmbeddingSearchRequest.builder()
-                    .queryEmbedding(questionEmbedding)
-                    .maxResults(fetchSize)
-                    .minScore(0.5)
-                    .build();
-            matches = embeddingStore.search(fallbackRequest).matches();
-        }
-
-        // 2b. Cross-encoder / LLM reranking — reorders by actual relevance to the question,
+        // 2a. Cross-encoder / LLM reranking — reorders by actual relevance to the question,
         // which vector cosine-similarity alone often gets wrong for nuanced queries.
         matches = rerankerService.rerank(question, matches);
 
-        // 2c. Feedback-aware re-ranking — nudge chunks from historically thumbs-up'd sources
+        // 2b. Feedback-aware re-ranking — nudge chunks from historically thumbs-up'd sources
         // up, and thumbs-down'd sources down, before building the context/answer.
         matches = applyFeedbackRanking(matches);
 
-        // 2d. Trim down to the final context size now that reranking + feedback have both had a say.
+        // 2c. Trim down to the final context size now that reranking + feedback have both had a say.
         if (matches.size() > maxResults) {
             matches = matches.subList(0, maxResults);
         }
@@ -147,7 +139,7 @@ public class RagQueryService {
         if (matches.isEmpty()) {
             String noAnswer = "I don't have enough information in the knowledge base to answer this question.";
             String interactionId = conversationMemoryService.addAssistantMessage(effectiveSessionId, noAnswer, List.of());
-            return new RagResponse(question, noAnswer, List.of(), effectiveSessionId, interactionId);
+            return new RagResponse(question, noAnswer, List.of(), effectiveSessionId, interactionId, intent.name());
         }
 
         // 3. Build context from retrieved chunks
@@ -187,7 +179,7 @@ public class RagQueryService {
                 .toList();
         String interactionId = conversationMemoryService.addAssistantMessage(effectiveSessionId, answer, sourceNames);
 
-        RagResponse ragResponse = new RagResponse(question, answer, sources, effectiveSessionId, interactionId);
+        RagResponse ragResponse = new RagResponse(question, answer, sources, effectiveSessionId, interactionId, intent.name());
 
         // Only cache first-turn (context-free) answers — see cache check above.
         if (!isFollowUp) {
@@ -205,7 +197,7 @@ public class RagQueryService {
                 .distinct()
                 .toList();
         String interactionId = conversationMemoryService.addAssistantMessage(sessionId, cached.answer(), sourceNames);
-        return new RagResponse(cached.question(), cached.answer(), cached.sources(), sessionId, interactionId);
+        return new RagResponse(cached.question(), cached.answer(), cached.sources(), sessionId, interactionId, cached.intent());
     }
 
     /**
@@ -233,6 +225,47 @@ public class RagQueryService {
                 .collect(Collectors.toList());
     }
 
+    /**
+     * Runs the vector search scoped to the current intent's category filter (catalog-only for
+     * LOOKUP, narrative-only for EXPLANATION). If intent routing is disabled, or the filtered
+     * search comes back empty (e.g. older chunks ingested before this feature existed have no
+     * {@code category} metadata), falls back to an unfiltered search rather than telling the
+     * user "I don't know" purely because of a routing miss.
+     */
+    private List<EmbeddingMatch<TextSegment>> searchByIntent(Embedding questionEmbedding, int fetchSize, QueryIntent intent) {
+        if (!intentRoutingProperties.isEnabled()) {
+            return embeddingStore.search(buildSearchRequest(questionEmbedding, fetchSize, null)).matches();
+        }
+
+        Filter filter = intentFilter(intent);
+        List<EmbeddingMatch<TextSegment>> matches =
+                embeddingStore.search(buildSearchRequest(questionEmbedding, fetchSize, filter)).matches();
+
+        if (matches.isEmpty() && intentRoutingProperties.isFallbackWhenEmpty()) {
+            log.info("Category-filtered search for intent={} returned no candidates — retrying unfiltered", intent);
+            matches = embeddingStore.search(buildSearchRequest(questionEmbedding, fetchSize, null)).matches();
+        }
+        return matches;
+    }
+
+    private EmbeddingSearchRequest buildSearchRequest(Embedding questionEmbedding, int fetchSize, Filter filter) {
+        var builder = EmbeddingSearchRequest.builder()
+                .queryEmbedding(questionEmbedding)
+                .maxResults(fetchSize)
+                .minScore(0.5);
+        if (filter != null) {
+            builder = builder.filter(filter);
+        }
+        return builder.build();
+    }
+
+    /** LOOKUP → Excel-derived catalog chunks only. EXPLANATION → DOCX-derived narrative chunks only. */
+    private Filter intentFilter(QueryIntent intent) {
+        return intent == QueryIntent.LOOKUP
+                ? metadataKey("category").isEqualTo(DocumentCategoryClassifier.CATALOG)
+                : metadataKey("category").isIn(DocumentCategoryClassifier.EXPLANATION_CATEGORIES);
+    }
+
     private String buildPrompt(String question, String context, String history) {
         String historyBlock = (history == null || history.isBlank())
                 ? ""
@@ -254,32 +287,35 @@ public class RagQueryService {
 
     // ── Response DTOs ────────────────────────────────────────────────────────
     public record RagResponse(String question, String answer, List<SourceReference> sources,
-                               String sessionId, String interactionId) {}
+                               String sessionId, String interactionId, String intent) {}
 
     public record SourceReference(String source, String type, double score, String excerpt,
-                                   java.util.Map<String, String> metadata) {}
+                                   Map<String, String> metadata) {}
 
     /**
-     * Pulls the metadata keys worth surfacing for debugging retrieval — structural (sheet, rows)
-     * and any of the configured business fields (offeringName, flatOfferingId, externalId, tuti,
-     * ...) that ExcelStructuredChunker put on this chunk — so it's visible in the response why a
-     * given row was matched, instead of having to go dig through the source spreadsheet.
+     * Pulls the metadata worth surfacing for debugging retrieval: structural spreadsheet location
+     * (workbook/sheet/sheetType/rowStart/rowEnd) plus every business/catalog field the chunk
+     * carries — known aliases (offeringName, flatOfferingId, ...), configured business-fields
+     * (rag.excel.business-fields, e.g. tuti), generically auto-detected *Id/*Name/*Key/*Code
+     * columns, tabHeader, and any ID-range-note fields — via
+     * {@link ExcelCatalogFields#extract}, which works by excluding structural keys rather than
+     * enumerating a fixed list, so it needs no maintenance as new fields are added. Non-Excel
+     * chunks simply return an empty map.
      */
-    private java.util.Map<String, String> extractDebugMetadata(dev.langchain4j.data.document.Metadata metadata) {
-        java.util.Map<String, String> debug = new java.util.LinkedHashMap<>();
-        for (String key : DEBUG_METADATA_KEYS) {
+    private Map<String, String> extractDebugMetadata(Metadata metadata) {
+        Map<String, String> debug = new LinkedHashMap<>();
+        for (String key : STRUCTURAL_DEBUG_KEYS) {
             String value = metadata.getString(key);
             if (value != null && !value.isBlank()) {
                 debug.put(key, value);
             }
         }
+        debug.putAll(ExcelCatalogFields.extract(metadata));
         return debug;
     }
 
-    private static final List<String> DEBUG_METADATA_KEYS = List.of(
-            "workbook", "sheet", "rowStart", "rowEnd",
-            "offeringName", "flatOfferingId", "offeringId", "externalId", "tuti"
-    );
+    private static final List<String> STRUCTURAL_DEBUG_KEYS =
+            List.of("workbook", "sheet", "sheetType", "rowStart", "rowEnd");
 
     /**
      * Staged progress callback so a caller (the Webex bot) can show live "thinking → searching

@@ -37,7 +37,8 @@ public class DocumentLoaderService {
             Document doc = pdfParser.parse(is);
             return Document.from(doc.text(),
                     Metadata.from("source", file.getOriginalFilename())
-                            .put("type", "PDF"));
+                            .put("type", "PDF")
+                            .put("category", DocumentCategoryClassifier.classify(file.getOriginalFilename(), DocumentType.PDF)));
         }
     }
 
@@ -48,7 +49,8 @@ public class DocumentLoaderService {
             Document doc = poiParser.parse(is);
             return Document.from(doc.text(),
                     Metadata.from("source", file.getOriginalFilename())
-                            .put("type", "DOCX"));
+                            .put("type", "DOCX")
+                            .put("category", DocumentCategoryClassifier.classify(file.getOriginalFilename(), DocumentType.DOCX)));
         }
     }
 
@@ -86,7 +88,8 @@ public class DocumentLoaderService {
 
             return Document.from(content.toString(),
                     Metadata.from("source", file.getOriginalFilename())
-                            .put("type", "EXCEL"));
+                            .put("type", "EXCEL")
+                            .put("category", DocumentCategoryClassifier.CATALOG));
         }
     }
 
@@ -102,7 +105,8 @@ public class DocumentLoaderService {
         return Document.from(text,
                 Metadata.from("source", url)
                         .put("type", "URL")
-                        .put("title", jsoupDoc.title()));
+                        .put("title", jsoupDoc.title())
+                        .put("category", DocumentCategoryClassifier.GENERAL));
     }
 
     // ── TXT / Plain text ─────────────────────────────────────────────────────
@@ -111,7 +115,8 @@ public class DocumentLoaderService {
         String text = new String(file.getBytes());
         return Document.from(text,
                 Metadata.from("source", file.getOriginalFilename())
-                        .put("type", "TXT"));
+                        .put("type", "TXT")
+                        .put("category", DocumentCategoryClassifier.classify(file.getOriginalFilename(), DocumentType.TXT)));
     }
 
     // ── Dispatcher ───────────────────────────────────────────────────────────
@@ -132,7 +137,8 @@ public class DocumentLoaderService {
             Document doc = pdfParser.parse(is);
             return Document.from(doc.text(),
                     Metadata.from("source", file.getAbsolutePath())
-                            .put("type", "PDF"));
+                            .put("type", "PDF")
+                            .put("category", DocumentCategoryClassifier.classify(file.getName(), DocumentType.PDF)));
         }
     }
 
@@ -142,7 +148,8 @@ public class DocumentLoaderService {
             Document doc = poiParser.parse(is);
             return Document.from(doc.text(),
                     Metadata.from("source", file.getAbsolutePath())
-                            .put("type", "DOCX"));
+                            .put("type", "DOCX")
+                            .put("category", DocumentCategoryClassifier.classify(file.getName(), DocumentType.DOCX)));
         }
     }
 
@@ -171,7 +178,8 @@ public class DocumentLoaderService {
 
             return Document.from(content.toString(),
                     Metadata.from("source", file.getAbsolutePath())
-                            .put("type", "EXCEL"));
+                            .put("type", "EXCEL")
+                            .put("category", DocumentCategoryClassifier.CATALOG));
         }
     }
 
@@ -180,7 +188,8 @@ public class DocumentLoaderService {
         String text = Files.readString(file.toPath());
         return Document.from(text,
                 Metadata.from("source", file.getAbsolutePath())
-                        .put("type", "TXT"));
+                        .put("type", "TXT")
+                        .put("category", DocumentCategoryClassifier.classify(file.getName(), DocumentType.TXT)));
     }
 
     // ── Dispatcher for disk files (folder ingestion) ─────────────────────────

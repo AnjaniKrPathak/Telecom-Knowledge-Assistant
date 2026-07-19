@@ -152,6 +152,12 @@ rag:
     huggingface:
       base-url: http://localhost:8081  # local Hugging Face Text-Embeddings-Inference (TEI) rerank server, no API key
       timeout-ms: 30000
+  intent-routing:
+    enabled: true               # route lookup questions (Offering Name/ID, CR ID, ...) to the Excel
+                                 # catalog only, and explanation questions ("what is X", "explain Y",
+                                 # "how does Z work") to the DOCX narrative chunks (FDS/BRD/rules) only
+    fallback-when-empty: true   # if the category-filtered search returns nothing, retry unfiltered
+                                 # instead of answering "I don't know" (covers docs ingested pre-feature)
 
 # Logging
 logging:
@@ -185,6 +191,7 @@ webex:
   thinking-status-enabled: true             # post a "🤔 Thinking..." placeholder and live-edit it (searching/drafting) while the answer is generated
   auto-sync-enabled: true                  # keep checking for ngrok URL changes after startup (not just once)
   auto-sync-interval-ms: 60000             # how often (ms) the background scheduler checks for a changed ngrok URL
+  broadcast-delay-ms: 250                  # pause (ms) between each send in a /api/webex/broadcast batch, to stay under rate limits
 
 # Ngrok Agent API (local) — used to auto-detect the current public tunnel URL
 ngrok:
