@@ -3,6 +3,7 @@ package com.rag.service;
 import com.rag.document.DocumentLoaderService;
 import com.rag.document.DocumentType;
 import com.rag.document.excel.ExcelStructuredChunker;
+import com.rag.graph.service.GraphIngestionService;
 import com.rag.model.DocumentRecord;
 import com.rag.repository.DocumentRepository;
 import dev.langchain4j.data.document.Document;
@@ -36,6 +37,7 @@ public class IngestionService {
     private final ExcelStructuredChunker excelChunker;
     private final EmbeddingStore<TextSegment> embeddingStore;
     private final DocumentRepository documentRepository;
+    private final GraphIngestionService graphIngestionService;
     private static final int EMBEDDING_BATCH_SIZE = 100;
 
     @Value("${rag.chunk-size}")
@@ -126,7 +128,12 @@ public class IngestionService {
             embeddingStore.addAll(embeddings, batch);
             log.info("Embedded batch {}-{}", i, end);
         }
-        // 4. Save metadata record
+        // 4. Push the same chunks through entity/relationship extraction into the knowledge graph.
+        // No-ops if rag.graph.enabled/auto-ingest is off, and fails open (logs + continues) if Neo4j
+        // is unreachable — a graph outage must never fail an otherwise-successful ingestion.
+        graphIngestionService.ingestSegments(segments, source);
+
+        // 5. Save metadata record
         DocumentRecord record = DocumentRecord.builder()
                 .name(source)
                 .type(type)
@@ -174,6 +181,10 @@ public class IngestionService {
                     i,
                     Math.min(i + EMBEDDING_BATCH_SIZE, segments.size()));
         }
+
+        // Same fail-open graph extraction hook as processDocument() — covers Excel ingestion and
+        // any other caller of ingestSegments(...) (e.g. git commit history via GitIngestionService).
+        graphIngestionService.ingestSegments(segments, source);
     }
 
     private DocumentRecord saveRecord(String source, String type, int chunkCount) {

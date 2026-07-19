@@ -181,6 +181,89 @@ Tunable via `rag.hybrid.*` in `application.yml` (see the Configuration table bel
 
 ---
 
+## Knowledge Graph (Neo4j)
+
+On top of vector + hybrid retrieval, ingested chunks are also mined for **entities** (Offerings,
+Flat Offerings, Change Requests, Bundles, Tariffs, Discounts, Rules, Relations, Price Keys, ...)
+and the **relationships** between them, written into a Neo4j graph. This adds graph-native
+retrieval on top of text search: dependency chains, root-cause leads, and change-impact analysis
+that a similarity search over chunk text alone can't answer, because the relationship may live in
+a completely different chunk than the one that mentions the entity you asked about.
+
+- **Entity extraction** — every catalog field on an Excel-derived chunk (offeringName,
+  flatOfferingId, changeRequestId, ruleId/ruleName, discountId, bundleId, tariffName, relationId,
+  priceKey, plus any configured/auto-detected `*Id`/`*Name`/`*Key`/`*Code` column) becomes a graph
+  node, keyed so the same identifier referenced from different sheets/documents merges onto one
+  node. A conservative regex fallback also recognizes common identifier mentions (`CR-1029`,
+  `Rule 71325001`, ...) directly in narrative DOCX/PDF text.
+- **Relationship extraction** — entities that co-occur in the same chunk/row are linked; if the
+  chunk's text contains a keyword like "depends on", "triggers", "replaces", or "overrides", the
+  link is typed and directed accordingly instead of a generic co-occurrence edge.
+- **Graph search** — free-text lookup of entities, and neighbor expansion to whatever's connected
+  to a given entity.
+- **Dependency analysis** — what an entity depends on, and what depends on it, transitively.
+- **Root-cause analysis** — given a "symptom" entity, ranks upstream candidates most likely to be
+  the root cause.
+- **Impact analysis** — given a changed entity, finds everything downstream that could be
+  affected, grouped by hop distance and source document.
+- **Path finding** — shortest path (and all shortest paths) between any two entities, regardless
+  of relationship type/direction.
+
+All of the above are heuristics inferred from co-occurrence and keyword matching, not verified
+domain logic — treat root-cause/impact/path results as leads to confirm, not ground truth.
+
+### Start Neo4j
+
+Neo4j is included in the project's `docker-compose.yml`:
+
+```bash
+docker compose up -d neo4j
+```
+
+Neo4j Browser → [http://localhost:7474](http://localhost:7474) (`neo4j` / `ragpassword`, matching
+`neo4j.*` in `application.yml`).
+
+### Populate the graph
+
+New ingestions (`POST /api/documents/upload`, `/url`, folder/batch ingestion) populate the graph
+automatically when `rag.graph.auto-ingest=true` (default). To (re)build the graph from everything
+already sitting in `document_embeddings` — e.g. documents ingested before this feature existed —
+run a one-off backfill (safe to re-run any time; every write is a MERGE-based upsert):
+
+```bash
+curl -X POST http://localhost:8080/api/graph/backfill
+```
+
+### Query the graph
+
+```bash
+# Find an entity
+curl "http://localhost:8080/api/graph/search?q=71325001"
+
+# What does Rule:71325001 depend on / what depends on it
+curl "http://localhost:8080/api/graph/entities/Rule:71325001/dependencies?depth=3"
+curl "http://localhost:8080/api/graph/entities/Rule:71325001/dependents?depth=3"
+
+# Candidate root causes upstream of a misbehaving rule
+curl "http://localhost:8080/api/graph/entities/Rule:71325001/root-cause?depth=4"
+
+# Blast radius if Offering:12345 changes
+curl "http://localhost:8080/api/graph/entities/Offering:12345/impact?depth=4"
+
+# Shortest connection between two entities, whatever it is
+curl "http://localhost:8080/api/graph/path?from=Rule:71325001&to=Offering:12345"
+```
+
+Entity ids follow `Type:normalizedValue` (e.g. `Rule:71325001`) — `GET /api/graph/search` or
+`GET /api/graph/entity-id?type=Rule&value=71325001` resolve a human-typed value to the exact id.
+
+Optionally, set `rag.graph.query-augmentation-enabled=true` to have `RagQueryService` add a short
+"related knowledge graph context" block (nearby dependencies/impact of entities recognized in the
+retrieved chunks) to the prompt before every answer — off by default so its effect on answer
+quality can be evaluated deliberately.
+
+---
+
 ## Webex Chatbot
 
 The bot answers questions asked in a Webex space via `/api/webex/webhook`, and keeps the space
@@ -299,6 +382,15 @@ All settings are in `src/main/resources/application.yml`:
 | `webex.attachment-actions-webhook-enabled` | `true` | Send Webex answers as Adaptive Cards with tappable 👍/👎 buttons instead of plain text |
 | `webex.broadcast-delay-ms` | `250` | Pause (ms) between each send in a `/api/webex/broadcast` batch, to stay under rate limits |
 | `rag.feedback.enabled` | `true` | Toggle whether accumulated thumbs up/down nudge retrieval ranking |
+| `neo4j.uri` | `bolt://localhost:7687` | Neo4j Bolt connection URI |
+| `neo4j.username` / `neo4j.password` | `neo4j` / `ragpassword` | Neo4j credentials (matches docker-compose.yml) |
+| `rag.graph.enabled` | `true` | Master switch for the knowledge-graph feature |
+| `rag.graph.auto-ingest` | `true` | Extract entities/relationships during normal file ingestion |
+| `rag.graph.entity-co-occurrence` | `true` | Link entities that co-occur in the same chunk/row |
+| `rag.graph.max-path-depth` | `6` | Hop ceiling for graph search / shortest-path / all-paths |
+| `rag.graph.max-dependency-depth` | `4` | Hop ceiling for dependency / root-cause / impact traversals |
+| `rag.graph.backfill-batch-size` | `500` | Rows read per page during `POST /api/graph/backfill` |
+| `rag.graph.query-augmentation-enabled` | `false` | Add graph dependency/impact context to the RAG prompt |
 
 ---
 
@@ -327,10 +419,20 @@ rag-project/
 │   │   └── LangChainConfig.java   # Ollama + PgVector beans
 │   ├── controller/
 │   │   ├── IngestionController.java
-│   │   └── QueryController.java
+│   │   ├── QueryController.java
+│   │   └── GraphController.java     # /api/graph/* — search, dependencies, root-cause, impact, paths
 │   ├── document/
 │   │   ├── DocumentType.java
 │   │   └── DocumentLoaderService.java   # Multi-format loader
+│   ├── graph/                       # Neo4j knowledge graph feature
+│   │   ├── model/                   # GraphEntity, GraphRelationship, GraphRelationType
+│   │   ├── extraction/               # EntityExtractionService, RelationshipExtractionService
+│   │   ├── service/                  # KnowledgeGraphService (all Neo4j reads/writes),
+│   │   │                             # GraphIngestionService, GraphBackfillService,
+│   │   │                             # GraphSearchService, DependencyAnalysisService,
+│   │   │                             # RootCauseAnalysisService, ImpactAnalysisService,
+│   │   │                             # PathFindingService, GraphContextEnricherService
+│   │   └── dto/                      # GraphBackfillReport
 │   ├── model/
 │   │   └── DocumentRecord.java
 │   ├── repository/

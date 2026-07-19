@@ -5,6 +5,7 @@ import com.rag.config.IntentRoutingProperties;
 import com.rag.config.RerankerProperties;
 import com.rag.document.DocumentCategoryClassifier;
 import com.rag.document.excel.ExcelCatalogFields;
+import com.rag.graph.service.GraphContextEnricherService;
 import com.rag.query.IntentDetectionService;
 import com.rag.query.QueryIntent;
 import dev.langchain4j.data.document.Metadata;
@@ -49,6 +50,7 @@ public class RagQueryService {
     private final RerankerProperties rerankerProperties;
     private final IntentDetectionService intentDetectionService;
     private final IntentRoutingProperties intentRoutingProperties;
+    private final GraphContextEnricherService graphContextEnricherService;
 
     @Value("${rag.max-results}")
     private int maxResults;
@@ -139,7 +141,7 @@ public class RagQueryService {
         if (matches.isEmpty()) {
             String noAnswer = "I don't have enough information in the knowledge base to answer this question.";
             String interactionId = conversationMemoryService.addAssistantMessage(effectiveSessionId, noAnswer, List.of());
-            return new RagResponse(question, noAnswer, List.of(), effectiveSessionId, interactionId, intent.name());
+            return new RagResponse(question, noAnswer, List.of(), effectiveSessionId, interactionId, intent.name(), List.of());
         }
 
         // 3. Build context from retrieved chunks
@@ -147,11 +149,21 @@ public class RagQueryService {
                 .map(match -> match.embedded().text())
                 .collect(Collectors.joining("\n\n---\n\n"));
 
+        // 3a. Optional knowledge-graph augmentation — off by default (rag.graph.query-augmentation-enabled).
+        // Recognizes catalog entities already present in the retrieved chunks and adds their known
+        // dependencies/impact from the graph, which can surface relationships that live in OTHER
+        // chunks than the ones retrieved for this specific question. Fails open (see
+        // GraphContextEnricherService) — a Neo4j outage never blocks answering from vector search alone.
+        List<Map<String, String>> catalogFieldsPerChunk = matches.stream()
+                .map(match -> ExcelCatalogFields.extract(match.embedded().metadata()))
+                .toList();
+        GraphContextEnricherService.GraphContext graphContext = graphContextEnricherService.enrich(catalogFieldsPerChunk);
+
         // 3b. Conversation history (if any) so the model can resolve follow-up references.
         String history = conversationMemoryService.buildHistoryContext(effectiveSessionId);
 
         // 4. Build RAG prompt
-        String prompt = buildPrompt(question, context, history);
+        String prompt = buildPrompt(question, context, history, graphContext.promptBlock());
 
         // 5. Generate answer using llama3
         listener.onGenerating(matches.size());
@@ -179,7 +191,8 @@ public class RagQueryService {
                 .toList();
         String interactionId = conversationMemoryService.addAssistantMessage(effectiveSessionId, answer, sourceNames);
 
-        RagResponse ragResponse = new RagResponse(question, answer, sources, effectiveSessionId, interactionId, intent.name());
+        RagResponse ragResponse = new RagResponse(question, answer, sources, effectiveSessionId, interactionId,
+                intent.name(), graphContext.relatedEntities());
 
         // Only cache first-turn (context-free) answers — see cache check above.
         if (!isFollowUp) {
@@ -197,7 +210,8 @@ public class RagQueryService {
                 .distinct()
                 .toList();
         String interactionId = conversationMemoryService.addAssistantMessage(sessionId, cached.answer(), sourceNames);
-        return new RagResponse(cached.question(), cached.answer(), cached.sources(), sessionId, interactionId, cached.intent());
+        return new RagResponse(cached.question(), cached.answer(), cached.sources(), sessionId, interactionId,
+                cached.intent(), cached.graphContext());
     }
 
     /**
@@ -266,11 +280,15 @@ public class RagQueryService {
                 : metadataKey("category").isIn(DocumentCategoryClassifier.EXPLANATION_CATEGORIES);
     }
 
-    private String buildPrompt(String question, String context, String history) {
+    private String buildPrompt(String question, String context, String history, String graphContextBlock) {
         String historyBlock = (history == null || history.isBlank())
                 ? ""
                 : "Conversation so far (for resolving references like \"it\"/\"that\"/\"the second one\" — " +
                   "do not treat this as source material):\n" + history + "\n\n";
+
+        String graphBlock = (graphContextBlock == null || graphContextBlock.isBlank())
+                ? ""
+                : graphContextBlock + "\n";
 
         return """
                 You are a helpful assistant. Use ONLY the context below to answer the question.
@@ -279,15 +297,16 @@ public class RagQueryService {
                 %sContext:
                 %s
                 
-                Question: %s
+                %sQuestion: %s
                 
                 Answer:
-                """.formatted(historyBlock, context, question);
+                """.formatted(historyBlock, context, graphBlock, question);
     }
 
     // ── Response DTOs ────────────────────────────────────────────────────────
     public record RagResponse(String question, String answer, List<SourceReference> sources,
-                               String sessionId, String interactionId, String intent) {}
+                               String sessionId, String interactionId, String intent,
+                               List<Map<String, Object>> graphContext) {}
 
     public record SourceReference(String source, String type, double score, String excerpt,
                                    Map<String, String> metadata) {}

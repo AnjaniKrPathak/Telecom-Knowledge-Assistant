@@ -62,6 +62,34 @@ services:
       retries: 5
       start_period: 60s   # first start downloads model weights, give it time before failing health checks
 
+  # ── Neo4j (Knowledge Graph) ──────────────────────────────────────────────────
+  # Powers com.rag.graph.* — entity/relationship extraction, graph search, dependency/root-cause/
+  # impact analysis, and path finding over catalog entities (Offerings, Rules, Discounts, Bundles,
+  # Change Requests, ...) and the documents/sheets they appear in. Matches neo4j.uri
+  # (bolt://localhost:7687) in application.yml. Browser UI at http://localhost:7474.
+  neo4j:
+    image: neo4j:5-community
+    container_name: rag-neo4j
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: neo4j/ragpassword
+      NEO4J_dbms_memory_pagecache_size: 512m
+      NEO4J_dbms_memory_heap_max__size: 1G
+    ports:
+      - "7474:7474"   # HTTP (browser UI)
+      - "7687:7687"   # Bolt (driver protocol — used by the app)
+    volumes:
+      - neo4j-data:/data
+      - neo4j-logs:/logs
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:7474 || exit 1"]
+      interval: 15s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+
 volumes:
   pgdata:
   hf-cache:
+  neo4j-data:
+  neo4j-logs:
