@@ -4,6 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rag.config.FullTextSearchSchemaInitializer;
 import com.rag.config.HybridSearchProperties;
+import com.rag.document.excel.ExcelCatalogFields;
 import dev.langchain4j.data.embedding.Embedding;
 import dev.langchain4j.data.segment.TextSegment;
 import dev.langchain4j.model.embedding.EmbeddingModel;
@@ -160,8 +161,10 @@ public class HybridSearchService {
                                 asString(metadata.get("type")),
                                 asString(metadata.get("workbook")),
                                 asString(metadata.get("sheet")),
+                                asString(metadata.get("sheetType")),
                                 asString(metadata.get("rowStart")),
                                 asString(metadata.get("rowEnd")),
+                                ExcelCatalogFields.extractFromRaw(metadata),
                                 bm25);
                     },
                     question, question, limit);
@@ -243,8 +246,10 @@ public class HybridSearchService {
                             segment.metadata().getString("type"),
                             segment.metadata().getString("workbook"),
                             segment.metadata().getString("sheet"),
+                            segment.metadata().getString("sheetType"),
                             segment.metadata().getString("rowStart"),
                             segment.metadata().getString("rowEnd"),
+                            ExcelCatalogFields.extract(segment.metadata()),
                             match.score(),
                             rrfContribution);
         }
@@ -254,7 +259,8 @@ public class HybridSearchService {
             double rrfContribution = 1.0 / (k + rank + 1);
             builders.computeIfAbsent(hit.id(), RetrievedChunk.Builder::new)
                     .withKeyword(hit.text(), hit.source(), hit.type(),
-                            hit.workbook(), hit.sheet(), hit.rowStart(), hit.rowEnd(),
+                            hit.workbook(), hit.sheet(), hit.sheetType(), hit.rowStart(), hit.rowEnd(),
+                            hit.catalogFields(),
                             hit.bm25Score(), rrfContribution);
         }
 
@@ -266,6 +272,7 @@ public class HybridSearchService {
     }
 
     private record KeywordHit(String id, String text, String source, String type,
-                               String workbook, String sheet, String rowStart, String rowEnd,
+                               String workbook, String sheet, String sheetType, String rowStart, String rowEnd,
+                               Map<String, String> catalogFields,
                                double bm25Score) {}
 }

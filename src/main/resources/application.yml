@@ -2,6 +2,13 @@ spring:
   application:
     name: rag-project
 
+  # Loads webex.bot-token (and any other secrets) from a separate, git-ignored file so
+  # nothing sensitive sits directly in this tracked application.yml. "optional:" means
+  # startup won't fail if the file is missing (e.g. CI, or when using WEBEX_BOT_TOKEN
+  # as an env var instead) — see config/webex-secrets.yml.example for the template.
+  config:
+    import: "optional:file:./config/webex-secrets.yml"
+
   profiles:
     active: default
 
@@ -78,6 +85,13 @@ rag:
     header-detection: true    # use the first non-blank row of each sheet as column headers
     max-cell-length: 2000     # truncate any single cell's text beyond this many characters
     skip-blank-rows: true     # don't create chunks for fully empty rows
+    range-validation-enabled: true  # flag an ID whose value falls outside its sheet's documented range
+    business-fields:          # spreadsheet column header -> metadata key, copied onto every
+      "Offering Name": offeringName        # chunk built from a row that has that column, so
+      "Flat Offering ID": flatOfferingId    # retrieval/debugging can key off these directly
+      "Offering ID": offeringId             # instead of only full-text/vector matching
+      "External ID": externalId
+      "TUTI": tuti
   git:
     workspace-dir: ./git-workspace    # local clone location (one subfolder per connected repo)
     compute-diff-stats: true          # compute insertions/deletions/files-changed per commit
@@ -106,6 +120,31 @@ rag:
     min-votes-for-adjustment: 1 # a source needs at least this many net votes before it's nudged
     webex-text-shortcuts-enabled: true  # let Webex users reply thumbs up/down to rate the bot's last answer
     webex-comment-prompt-ttl-minutes: 5  # how long the bot waits for an optional comment after a Webex rating
+  query-routing:
+    enabled: true             # filter retrieval to one document type based on question keywords
+    excel-keywords:           # if the question contains any of these, only type=EXCEL chunks are searched
+      - "flat offering"
+      - "offering id"
+      - "offering name"
+      - "external id"
+      - "Relation Id"
+      - "rule id"
+      - "Discount Id"
+      - "Price Key"
+      - "Relation Id"
+      - "Offering Template"
+      - "Design Task"
+      - "Find"
+    docx-keywords:            # checked only if no excel-keyword matched; filters to type=DOCX
+      - "what is"
+      - "what are"
+      - "how does"
+      - "how do"
+      - "how is"
+      - "explain"
+      - "why does"
+      - "why is"
+      - "describe"
   reranker:
     enabled: true              # rerank retrieved chunks for more accurate context before answering
     provider: huggingface      # huggingface | llm | none
@@ -114,6 +153,12 @@ rag:
     huggingface:
       base-url: http://localhost:8081  # local Hugging Face Text-Embeddings-Inference (TEI) rerank server, no API key
       timeout-ms: 30000
+  intent-routing:
+    enabled: true               # route lookup questions (Offering Name/ID, CR ID, ...) to the Excel
+                                 # catalog only, and explanation questions ("what is X", "explain Y",
+                                 # "how does Z work") to the DOCX narrative chunks (FDS/BRD/rules) only
+    fallback-when-empty: true   # if the category-filtered search returns nothing, retry unfiltered
+                                 # instead of answering "I don't know" (covers docs ingested pre-feature)
 
 # Logging
 logging:
@@ -131,7 +176,7 @@ springdoc:
 
 # Webex Chatbot Configuration
 webex:
-  bot-token: ${WEBEX_BOT_TOKEN:NTI5ZjA1OGQtYTY4YS00NzU3LThhNTgtOTE1NGRhNGIzZWU0MjRhYTJlMzEtZDcy_PF84_ba052c1a-a74c-48df-aead-18cddd1bffcc}          # get this from https://developer.webex.com/my-apps -> Create a Bot
+  bot-token: ${WEBEX_BOT_TOKEN:}          # set in config/webex-secrets.yml (git-ignored) — see config/webex-secrets.yml.example
   api-base-url: https://webexapis.com/v1
   webhook-secret: ${WEBEX_WEBHOOK_SECRET:}  # optional, but recommended - must match the "secret" used when registering the webhook
   bot-email: ${WEBEX_BOT_EMAIL:msexpert@webex.bot}
@@ -144,8 +189,10 @@ webex:
   remove-duplicate-webhooks: true          # if multiple webhooks share webhook-name, delete all but the oldest
   actions-webhook-name: SpringBootWebhookActions  # 2nd webhook (attachmentActions/created) powering inline Like/Dislike buttons
   attachment-actions-webhook-enabled: true  # send answers as Adaptive Cards with tappable Like/Dislike buttons instead of plain text
+  thinking-status-enabled: true             # post a "🤔 Thinking..." placeholder and live-edit it (searching/drafting) while the answer is generated
   auto-sync-enabled: true                  # keep checking for ngrok URL changes after startup (not just once)
   auto-sync-interval-ms: 60000             # how often (ms) the background scheduler checks for a changed ngrok URL
+  broadcast-delay-ms: 250                  # pause (ms) between each send in a /api/webex/broadcast batch, to stay under rate limits
 
 # Ngrok Agent API (local) — used to auto-detect the current public tunnel URL
 ngrok:

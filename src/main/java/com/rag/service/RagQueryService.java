@@ -1,7 +1,13 @@
 package com.rag.service;
 
 import com.rag.config.ConversationMemoryProperties;
+import com.rag.config.IntentRoutingProperties;
 import com.rag.config.RerankerProperties;
+import com.rag.document.DocumentCategoryClassifier;
+import com.rag.document.excel.ExcelCatalogFields;
+import com.rag.query.IntentDetectionService;
+import com.rag.query.QueryIntent;
+import dev.langchain4j.data.document.Metadata;
 import dev.langchain4j.data.embedding.Embedding;
 import dev.langchain4j.data.message.AiMessage;
 import dev.langchain4j.data.message.UserMessage;
@@ -12,15 +18,20 @@ import dev.langchain4j.model.output.Response;
 import dev.langchain4j.store.embedding.EmbeddingMatch;
 import dev.langchain4j.store.embedding.EmbeddingSearchRequest;
 import dev.langchain4j.store.embedding.EmbeddingStore;
+import dev.langchain4j.store.embedding.filter.Filter;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
 import java.util.Comparator;
+import java.util.LinkedHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.Optional;
 import java.util.stream.Collectors;
+
+import static dev.langchain4j.store.embedding.filter.MetadataFilterBuilder.metadataKey;
 
 @Slf4j
 @Service
@@ -36,13 +47,20 @@ public class RagQueryService {
     private final FeedbackService feedbackService;
     private final RerankerService rerankerService;
     private final RerankerProperties rerankerProperties;
+    private final IntentDetectionService intentDetectionService;
+    private final IntentRoutingProperties intentRoutingProperties;
 
     @Value("${rag.max-results}")
     private int maxResults;
 
     /** Stateless overload — kept for callers that don't care about conversation memory. */
     public RagResponse query(String question) {
-        return query(question, null);
+        return query(question, null, QueryProgressListener.NOOP);
+    }
+
+    /** Session-aware overload — kept for callers (REST API) that don't need live progress callbacks. */
+    public RagResponse query(String question, String sessionId) {
+        return query(question, sessionId, QueryProgressListener.NOOP);
     }
 
     /**
@@ -51,14 +69,20 @@ public class RagQueryService {
      * second one?" resolve correctly), retrieved chunks are re-ranked using accumulated
      * feedback (see FeedbackService), and both the question and the answer are persisted to
      * conversation memory before returning.
+     * <p>
+     * {@code listener} gets called at each pipeline stage (cache check, retrieval, generation)
+     * so a caller like the Webex bot can show live "thinking → searching → drafting" progress
+     * instead of the room sitting on one long silent wait. Purely observational — it never
+     * changes what gets retrieved or answered.
      *
      * @param sessionId caller-supplied or previously-issued session id; a new one is minted if null/blank
      */
-    public RagResponse query(String question, String sessionId) {
+    public RagResponse query(String question, String sessionId, QueryProgressListener listener) {
         String effectiveSessionId = (sessionId == null || sessionId.isBlank())
                 ? conversationMemoryService.newSessionId()
                 : sessionId;
         log.info("RAG query [session={}]: {}", effectiveSessionId, question);
+        listener.onCacheChecking();
 
         boolean isFollowUp = memoryProperties.isEnabled() && conversationMemoryService.hasHistory(effectiveSessionId);
         conversationMemoryService.addUserMessage(effectiveSessionId, question);
@@ -72,12 +96,22 @@ public class RagQueryService {
         if (!isFollowUp) {
             Optional<RagResponse> cached = queryCacheService.get(question);
             if (cached.isPresent()) {
+                listener.onCacheHit();
                 return finalizeCachedResponse(cached.get(), effectiveSessionId);
             }
         }
 
         // 1. Embed the question
+        listener.onSearching();
         Embedding questionEmbedding = embeddingModel.embed(question).content();
+
+        // 1a. Classify intent — LOOKUP (Offering Name / Flat Offering ID / External ID / CR ID /
+        // Product ID / Service ID, ...) is answered from the Excel-derived catalog chunks only;
+        // EXPLANATION ("what is X", "explain Y", "how does Z work") is answered from the
+        // DOCX-derived narrative chunks (FDS/BRD/rules) only. See IntentDetectionService and
+        // DocumentCategoryClassifier for how questions/chunks are classified.
+        QueryIntent intent = intentDetectionService.detect(question);
+        log.info("Detected intent={} for question: {}", intent, question);
 
         // 2. Retrieve candidates from pgvector. When reranking is on, cast a wider net
         // (rag.reranker.candidate-pool-size) so the reranker has real choices to make, then trim
@@ -86,14 +120,8 @@ public class RagQueryService {
                 ? Math.max(rerankerProperties.getCandidatePoolSize(), maxResults)
                 : maxResults;
 
-        EmbeddingSearchRequest searchRequest = EmbeddingSearchRequest.builder()
-                .queryEmbedding(questionEmbedding)
-                .maxResults(fetchSize)
-                .minScore(0.5)
-                .build();
-
-        List<EmbeddingMatch<TextSegment>> matches = embeddingStore.search(searchRequest).matches();
-        log.info("Retrieved {} candidate chunks (fetchSize={})", matches.size(), fetchSize);
+        List<EmbeddingMatch<TextSegment>> matches = searchByIntent(questionEmbedding, fetchSize, intent);
+        log.info("Retrieved {} candidate chunks (fetchSize={}, intent={})", matches.size(), fetchSize, intent);
 
         // 2a. Cross-encoder / LLM reranking — reorders by actual relevance to the question,
         // which vector cosine-similarity alone often gets wrong for nuanced queries.
@@ -111,7 +139,7 @@ public class RagQueryService {
         if (matches.isEmpty()) {
             String noAnswer = "I don't have enough information in the knowledge base to answer this question.";
             String interactionId = conversationMemoryService.addAssistantMessage(effectiveSessionId, noAnswer, List.of());
-            return new RagResponse(question, noAnswer, List.of(), effectiveSessionId, interactionId);
+            return new RagResponse(question, noAnswer, List.of(), effectiveSessionId, interactionId, intent.name());
         }
 
         // 3. Build context from retrieved chunks
@@ -126,17 +154,21 @@ public class RagQueryService {
         String prompt = buildPrompt(question, context, history);
 
         // 5. Generate answer using llama3
+        listener.onGenerating(matches.size());
         Response<AiMessage> response = chatLanguageModel.generate(UserMessage.from(prompt));
         String answer = response.content().text();
         log.info("Generated answer (length={})", answer.length());
 
-        // 6. Build source references
+        // 6. Build source references — includes structured metadata (sheet/row, business fields
+        // like offeringName/flatOfferingId/externalId/tuti when present) so it's obvious from the
+        // response alone WHY a given chunk was retrieved, without cross-referencing the source file.
         List<SourceReference> sources = matches.stream()
                 .map(match -> new SourceReference(
                         match.embedded().metadata().getString("source"),
                         match.embedded().metadata().getString("type"),
                         match.score(),
-                        match.embedded().text().substring(0, Math.min(200, match.embedded().text().length())) + "..."
+                        match.embedded().text().substring(0, Math.min(200, match.embedded().text().length())) + "...",
+                        extractDebugMetadata(match.embedded().metadata())
                 ))
                 .collect(Collectors.toList());
 
@@ -147,7 +179,7 @@ public class RagQueryService {
                 .toList();
         String interactionId = conversationMemoryService.addAssistantMessage(effectiveSessionId, answer, sourceNames);
 
-        RagResponse ragResponse = new RagResponse(question, answer, sources, effectiveSessionId, interactionId);
+        RagResponse ragResponse = new RagResponse(question, answer, sources, effectiveSessionId, interactionId, intent.name());
 
         // Only cache first-turn (context-free) answers — see cache check above.
         if (!isFollowUp) {
@@ -165,7 +197,7 @@ public class RagQueryService {
                 .distinct()
                 .toList();
         String interactionId = conversationMemoryService.addAssistantMessage(sessionId, cached.answer(), sourceNames);
-        return new RagResponse(cached.question(), cached.answer(), cached.sources(), sessionId, interactionId);
+        return new RagResponse(cached.question(), cached.answer(), cached.sources(), sessionId, interactionId, cached.intent());
     }
 
     /**
@@ -193,6 +225,47 @@ public class RagQueryService {
                 .collect(Collectors.toList());
     }
 
+    /**
+     * Runs the vector search scoped to the current intent's category filter (catalog-only for
+     * LOOKUP, narrative-only for EXPLANATION). If intent routing is disabled, or the filtered
+     * search comes back empty (e.g. older chunks ingested before this feature existed have no
+     * {@code category} metadata), falls back to an unfiltered search rather than telling the
+     * user "I don't know" purely because of a routing miss.
+     */
+    private List<EmbeddingMatch<TextSegment>> searchByIntent(Embedding questionEmbedding, int fetchSize, QueryIntent intent) {
+        if (!intentRoutingProperties.isEnabled()) {
+            return embeddingStore.search(buildSearchRequest(questionEmbedding, fetchSize, null)).matches();
+        }
+
+        Filter filter = intentFilter(intent);
+        List<EmbeddingMatch<TextSegment>> matches =
+                embeddingStore.search(buildSearchRequest(questionEmbedding, fetchSize, filter)).matches();
+
+        if (matches.isEmpty() && intentRoutingProperties.isFallbackWhenEmpty()) {
+            log.info("Category-filtered search for intent={} returned no candidates — retrying unfiltered", intent);
+            matches = embeddingStore.search(buildSearchRequest(questionEmbedding, fetchSize, null)).matches();
+        }
+        return matches;
+    }
+
+    private EmbeddingSearchRequest buildSearchRequest(Embedding questionEmbedding, int fetchSize, Filter filter) {
+        var builder = EmbeddingSearchRequest.builder()
+                .queryEmbedding(questionEmbedding)
+                .maxResults(fetchSize)
+                .minScore(0.5);
+        if (filter != null) {
+            builder = builder.filter(filter);
+        }
+        return builder.build();
+    }
+
+    /** LOOKUP → Excel-derived catalog chunks only. EXPLANATION → DOCX-derived narrative chunks only. */
+    private Filter intentFilter(QueryIntent intent) {
+        return intent == QueryIntent.LOOKUP
+                ? metadataKey("category").isEqualTo(DocumentCategoryClassifier.CATALOG)
+                : metadataKey("category").isIn(DocumentCategoryClassifier.EXPLANATION_CATEGORIES);
+    }
+
     private String buildPrompt(String question, String context, String history) {
         String historyBlock = (history == null || history.isBlank())
                 ? ""
@@ -214,7 +287,54 @@ public class RagQueryService {
 
     // ── Response DTOs ────────────────────────────────────────────────────────
     public record RagResponse(String question, String answer, List<SourceReference> sources,
-                               String sessionId, String interactionId) {}
+                               String sessionId, String interactionId, String intent) {}
 
-    public record SourceReference(String source, String type, double score, String excerpt) {}
+    public record SourceReference(String source, String type, double score, String excerpt,
+                                   Map<String, String> metadata) {}
+
+    /**
+     * Pulls the metadata worth surfacing for debugging retrieval: structural spreadsheet location
+     * (workbook/sheet/sheetType/rowStart/rowEnd) plus every business/catalog field the chunk
+     * carries — known aliases (offeringName, flatOfferingId, ...), configured business-fields
+     * (rag.excel.business-fields, e.g. tuti), generically auto-detected *Id/*Name/*Key/*Code
+     * columns, tabHeader, and any ID-range-note fields — via
+     * {@link ExcelCatalogFields#extract}, which works by excluding structural keys rather than
+     * enumerating a fixed list, so it needs no maintenance as new fields are added. Non-Excel
+     * chunks simply return an empty map.
+     */
+    private Map<String, String> extractDebugMetadata(Metadata metadata) {
+        Map<String, String> debug = new LinkedHashMap<>();
+        for (String key : STRUCTURAL_DEBUG_KEYS) {
+            String value = metadata.getString(key);
+            if (value != null && !value.isBlank()) {
+                debug.put(key, value);
+            }
+        }
+        debug.putAll(ExcelCatalogFields.extract(metadata));
+        return debug;
+    }
+
+    private static final List<String> STRUCTURAL_DEBUG_KEYS =
+            List.of("workbook", "sheet", "sheetType", "rowStart", "rowEnd");
+
+    /**
+     * Staged progress callback so a caller (the Webex bot) can show live "thinking → searching
+     * → drafting" status instead of one long silent wait. All methods are default no-ops;
+     * implement only the stages you want to react to. Purely observational.
+     */
+    public interface QueryProgressListener {
+        QueryProgressListener NOOP = new QueryProgressListener() {};
+
+        /** About to check the query cache (the very first thing a fresh turn does). */
+        default void onCacheChecking() {}
+
+        /** A cached answer was found and is being returned as-is — no retrieval/generation ran. */
+        default void onCacheHit() {}
+
+        /** About to embed the question and search the vector store. */
+        default void onSearching() {}
+
+        /** Retrieval (+ reranking + feedback ranking) is done; about to call the LLM to draft the answer. */
+        default void onGenerating(int sourceCount) {}
+    }
 }

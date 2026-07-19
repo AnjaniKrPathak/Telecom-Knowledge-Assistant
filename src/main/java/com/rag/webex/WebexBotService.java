@@ -142,26 +142,83 @@ public class WebexBotService {
 
             // log.info("Webex question from {}: {}", message.getPersonEmail(), question);
 
-            RagResponse ragResponse = ragQueryService.query(question, roomId);
-            String replyText = formatReply(ragResponse);
-            if (webexProperties.isAttachmentActionsWebhookEnabled()) {
-                Map<String, Object> card = buildFeedbackCard(replyText, ragResponse.interactionId());
-                if (message != null) {
-                    webexClient.sendCardToRoom(message.getRoomId(), replyText, card);
-                } else {
-                    webexClient.sendCardToRoom("Y2lzY29zcGFyazovL3VzL1BFT1BMRS9hODg0M2QzMS1lMmQ0LTQ0MmUtYTU0OC0xM2I0MzUyZmU1MzU", replyText, card);
-                }
-            } else {
-                if (message != null) {
-                    webexClient.sendMessageToRoom(message.getRoomId(), replyText);
-                } else {
-                    webexClient.sendMessageToRoom("Y2lzY29zcGFyazovL3VzL1BFT1BMRS9hODg0M2QzMS1lMmQ0LTQ0MmUtYTU0OC0xM2I0MzUyZmU1MzU", replyText);
-                }
-            }
-
+            answerAndReply(roomId, question);
 
         } catch (Exception e) {
             log.error("Error handling Webex webhook event", e);
+        }
+    }
+
+    /**
+     * Runs the RAG query for {@code question} and sends the reply into {@code roomId}, same as
+     * before — with one addition: if {@code webex.thinking-status-enabled} is on, a "🤔
+     * Thinking..." placeholder is posted first and live-edited ("🔎 Searching...", "📚
+     * Drafting...") via {@link WebexQueryProgress} while the pipeline runs, then removed once
+     * the real answer/card has been sent, so the space shows progress instead of sitting silent.
+     */
+    private void answerAndReply(String roomId, String question) {
+        String placeholderId = null;
+        if (webexProperties.isThinkingStatusEnabled()) {
+            WebexMessage placeholder = webexClient.sendMessageToRoom(roomId, "🤔 Thinking about your question...");
+            placeholderId = placeholder != null ? placeholder.getId() : null;
+        }
+        RagQueryService.QueryProgressListener progress = placeholderId == null
+                ? RagQueryService.QueryProgressListener.NOOP
+                : new WebexQueryProgress(webexClient, roomId, placeholderId);
+
+        RagResponse ragResponse = ragQueryService.query(question, roomId, progress);
+        String replyText = formatReply(ragResponse);
+        if (webexProperties.isAttachmentActionsWebhookEnabled()) {
+            Map<String, Object> card = buildFeedbackCard(replyText, ragResponse.interactionId());
+            webexClient.sendCardToRoom(roomId, replyText, card);
+        } else {
+            webexClient.sendMessageToRoom(roomId, replyText);
+        }
+
+        if (placeholderId != null) {
+            webexClient.deleteMessage(placeholderId);
+        }
+    }
+
+    /**
+     * Turns RagQueryService's staged callbacks into live edits of the Webex placeholder message,
+     * so the room sees "thinking → searching → drafting" instead of one long silent wait.
+     * Edit failures are logged and swallowed — a missed status update should never break the
+     * actual answer from being generated and sent.
+     */
+    private static class WebexQueryProgress implements RagQueryService.QueryProgressListener {
+        private final WebexClient webexClient;
+        private final String roomId;
+        private final String messageId;
+
+        WebexQueryProgress(WebexClient webexClient, String roomId, String messageId) {
+            this.webexClient = webexClient;
+            this.roomId = roomId;
+            this.messageId = messageId;
+        }
+
+        @Override
+        public void onCacheHit() {
+            edit("⚡ I've answered something like this recently — pulling up that answer...");
+        }
+
+        @Override
+        public void onSearching() {
+            edit("🔎 Searching the knowledge base for relevant documents...");
+        }
+
+        @Override
+        public void onGenerating(int sourceCount) {
+            edit("📚 Found " + sourceCount + " relevant source" + (sourceCount == 1 ? "" : "s")
+                    + " — drafting an answer...");
+        }
+
+        private void edit(String text) {
+            try {
+                webexClient.editMessage(messageId, roomId, text);
+            } catch (Exception e) {
+                log.debug("Could not update Webex thinking message: {}", e.getMessage());
+            }
         }
     }
 

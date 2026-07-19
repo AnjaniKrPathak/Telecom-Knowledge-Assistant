@@ -181,6 +181,69 @@ Tunable via `rag.hybrid.*` in `application.yml` (see the Configuration table bel
 
 ---
 
+## Webex Chatbot
+
+The bot answers questions asked in a Webex space via `/api/webex/webhook`, and keeps the space
+engaged instead of going quiet while it works:
+
+1. It immediately posts **"🤔 Thinking about your question..."**
+2. It edits that same message in place as `RagQueryService` moves through its stages —
+   **"🔎 Searching the knowledge base..."** → **"📚 Found N relevant sources — drafting an
+   answer..."** — via Webex's message-edit API (`PUT /v1/messages/{id}`), so the user watches
+   live progress rather than sitting on one long silent wait.
+3. It sends the real answer as an Adaptive Card with inline **👍 Like / 👎 Dislike** buttons
+   (or, for clients that don't render cards, as plain text — reply `👍`/`👎` to rate the last
+   answer instead), then removes the "thinking" placeholder.
+
+Tapping a button (or replying `👍`/`👎`, or "helpful"/"not helpful") fires the existing feedback
+loop — `FeedbackService` records the rating and folds it into future retrieval ranking (see
+`FeedbackService.sourceBoost`) — and the bot follows up asking if you'd like to add a comment.
+
+Set `webex.thinking-status-enabled: false` to skip the placeholder/live-edit step and just send
+one reply, e.g. if edit/delete calls meaningfully count against a rate-limited bot token.
+
+The Webex room id doubles as the conversation-memory session id, so every space automatically
+gets its own running conversation (follow-up questions resolve using history) with zero manual
+setup. Both required webhooks (`messages/created` for questions, `attachmentActions/created` for
+button taps) are kept in sync with your current ngrok URL automatically — no manual Developer
+Portal steps.
+
+### Broadcasting (proactive messages)
+
+`POST /api/webex/broadcast` lets the bot push a message to people/rooms first, instead of only
+ever replying inside a space someone messaged it in:
+
+```bash
+curl -X POST https://your-public-host/api/webex/broadcast \
+  -H "Content-Type: application/json" \
+  -d '{
+        "message": "🔔 Maintenance window tonight 10pm-12am IST.",
+        "personEmails": ["alice@example.com", "bob@example.com"],
+        "roomIds": [],
+        "allKnownRooms": false
+      }'
+```
+
+Webex auto-creates the 1:1 room the first time the bot messages a person, so no prior chat is
+needed. Set `allKnownRooms: true` to also broadcast to every room the bot currently belongs to
+(fetched live via `GET /v1/rooms`). Every target is attempted independently — one failed send
+never aborts the rest — and the response reports a per-target success/failure breakdown.
+`webex.broadcast-delay-ms` (default 250ms) paces sends to stay under Webex's rate limits.
+
+### Secrets
+
+The bot token now lives in `config/webex-secrets.yml` — a git-ignored file, not the tracked
+`application.yml` — imported via `spring.config.import`. Copy the template and fill in your token:
+
+```bash
+cp config/webex-secrets.yml.example config/webex-secrets.yml
+```
+
+Get a token from https://developer.webex.com/my-apps → Create a Bot. `WEBEX_BOT_TOKEN` as an
+environment variable still works too (`application.yml`'s `${WEBEX_BOT_TOKEN:}` falls back to it).
+
+---
+
 ## Switching LLM Providers
 
 The chat model is provider-switchable via Spring profiles — no code changes needed. Four
@@ -229,6 +292,13 @@ All settings are in `src/main/resources/application.yml`:
 | `rag.hybrid.rrf-k` | `60` | Reciprocal Rank Fusion smoothing constant |
 | `rag.hybrid.min-vector-score` | `0.5` | Cosine-similarity floor for the vector leg |
 | `rag.hybrid.fts-language` | `english` | Postgres text-search configuration |
+| `rag.intent-routing.enabled` | `true` | Route lookup questions (Offering Name/ID, CR ID, ...) to the Excel catalog only, and explanation questions to the DOCX narrative chunks only |
+| `rag.intent-routing.fallback-when-empty` | `true` | Retry unfiltered if the category-filtered search returns nothing |
+| `rag.excel.business-fields` | `{TUTI: tuti}` | Extra spreadsheet column header → metadata key mappings, for a column not already covered by the built-in known-alias table or the generic *Id/*Name/*Key/*Code fallback |
+| `webex.thinking-status-enabled` | `true` | Post a "🤔 Thinking..." placeholder and live-edit it (searching/drafting) while the Webex bot works |
+| `webex.attachment-actions-webhook-enabled` | `true` | Send Webex answers as Adaptive Cards with tappable 👍/👎 buttons instead of plain text |
+| `webex.broadcast-delay-ms` | `250` | Pause (ms) between each send in a `/api/webex/broadcast` batch, to stay under rate limits |
+| `rag.feedback.enabled` | `true` | Toggle whether accumulated thumbs up/down nudge retrieval ranking |
 
 ---
 

@@ -1,5 +1,7 @@
 package com.rag.search;
 
+import java.util.Map;
+
 /**
  * A single retrieved chunk after hybrid (vector + keyword) retrieval and fusion.
  *
@@ -9,8 +11,20 @@ package com.rag.search;
  * @param type           value of the "type" metadata key (PDF, DOCX, EXCEL, TXT, URL...)
  * @param workbook       for EXCEL chunks: the workbook (spreadsheet file) name; null otherwise
  * @param sheet          for EXCEL chunks: the sheet name the chunk came from; null otherwise
+ * @param sheetType      for EXCEL chunks: canonical sheet-type tag derived from the tab name
+ *                       (e.g. "offering", "optionalOffering", "refill", "relationsOverride",
+ *                       "characteristicsOverride", "priceListItem", "complexFlatRule", "discount",
+ *                       "rule", or "general") — see {@code com.rag.document.excel.ExcelSheetType}.
+ *                       Null for non-Excel chunks.
  * @param rowStart       for EXCEL chunks: 1-based first spreadsheet row covered by this chunk; null otherwise
  * @param rowEnd         for EXCEL chunks: 1-based last spreadsheet row covered by this chunk; null otherwise
+ * @param catalogFields  for EXCEL chunks: canonical catalog-identifier fields recognized in this
+ *                       sheet's header row and populated for this row — any of offeringName,
+ *                       externalId, flatOfferingId, changeRequestId, bundleId, bundleName,
+ *                       tariffName, discountId, discountName, ruleId, ruleName, relationId, plus
+ *                       tabHeader (the sheet's header-row summary) — see
+ *                       {@code com.rag.document.excel.ExcelCatalogFields}. Only keys with a
+ *                       non-blank value are present. Empty (never null) for non-Excel chunks.
  * @param vectorScore    cosine similarity from the vector leg, or null if this chunk was
  *                       only found via keyword search
  * @param bm25Score      Okapi BM25 relevance score from the keyword leg, or null if this
@@ -25,8 +39,10 @@ public record RetrievedChunk(
         String type,
         String workbook,
         String sheet,
+        String sheetType,
         String rowStart,
         String rowEnd,
+        Map<String, String> catalogFields,
         Double vectorScore,
         Double bm25Score,
         double combinedScore,
@@ -45,6 +61,22 @@ public record RetrievedChunk(
         return sheet + ", " + rows;
     }
 
+    /**
+     * Human-readable "field=value" summary of whichever catalog identifiers this chunk carries
+     * (e.g. "flatOfferingId=FO-1029, changeRequestId=CR-4521"), or null if none were recognized.
+     * Meant for debugging/logging — showing exactly which business identifiers a retrieved chunk
+     * matched on, without needing to open the source workbook.
+     */
+    public String catalogFieldSummary() {
+        if (catalogFields == null || catalogFields.isEmpty()) {
+            return null;
+        }
+        return catalogFields.entrySet().stream()
+                .map(e -> e.getKey() + "=" + e.getValue())
+                .reduce((a, b) -> a + ", " + b)
+                .orElse(null);
+    }
+
     /** Mutable accumulator used while merging the two retrieval legs by RRF. */
     static final class Builder {
         private final String id;
@@ -53,8 +85,10 @@ public record RetrievedChunk(
         private String type;
         private String workbook;
         private String sheet;
+        private String sheetType;
         private String rowStart;
         private String rowEnd;
+        private Map<String, String> catalogFields = Map.of();
         private Double vectorScore;
         private Double bm25Score;
         private double combinedScore;
@@ -66,15 +100,18 @@ public record RetrievedChunk(
         }
 
         Builder withVector(String text, String source, String type,
-                            String workbook, String sheet, String rowStart, String rowEnd,
+                            String workbook, String sheet, String sheetType, String rowStart, String rowEnd,
+                            Map<String, String> catalogFields,
                             double vectorScore, double rrfContribution) {
             this.text = text;
             this.source = source;
             this.type = type;
             this.workbook = workbook;
             this.sheet = sheet;
+            this.sheetType = sheetType;
             this.rowStart = rowStart;
             this.rowEnd = rowEnd;
+            this.catalogFields = catalogFields != null ? catalogFields : Map.of();
             this.vectorScore = vectorScore;
             this.combinedScore += rrfContribution;
             this.fromVector = true;
@@ -82,7 +119,8 @@ public record RetrievedChunk(
         }
 
         Builder withKeyword(String text, String source, String type,
-                             String workbook, String sheet, String rowStart, String rowEnd,
+                             String workbook, String sheet, String sheetType, String rowStart, String rowEnd,
+                             Map<String, String> catalogFields,
                              double bm25Score, double rrfContribution) {
             if (this.text == null) {
                 this.text = text;
@@ -90,8 +128,10 @@ public record RetrievedChunk(
                 this.type = type;
                 this.workbook = workbook;
                 this.sheet = sheet;
+                this.sheetType = sheetType;
                 this.rowStart = rowStart;
                 this.rowEnd = rowEnd;
+                this.catalogFields = catalogFields != null ? catalogFields : Map.of();
             }
             this.bm25Score = bm25Score;
             this.combinedScore += rrfContribution;
@@ -101,8 +141,8 @@ public record RetrievedChunk(
 
         RetrievedChunk build() {
             String matchType = fromVector && fromKeyword ? "HYBRID" : fromVector ? "VECTOR" : "KEYWORD";
-            return new RetrievedChunk(id, text, source, type, workbook, sheet, rowStart, rowEnd,
-                    vectorScore, bm25Score, combinedScore, matchType);
+            return new RetrievedChunk(id, text, source, type, workbook, sheet, sheetType, rowStart, rowEnd,
+                    catalogFields, vectorScore, bm25Score, combinedScore, matchType);
         }
     }
 }
