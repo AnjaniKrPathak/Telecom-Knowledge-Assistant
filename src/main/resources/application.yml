@@ -10,7 +10,7 @@ spring:
     import: "optional:file:./config/webex-secrets.yml"
 
   profiles:
-    active: default
+    active: kimi
 
   datasource:
     url: jdbc:postgresql://localhost:5434/ragdb

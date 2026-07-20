@@ -29,3 +29,6 @@ target/
 config/webex-secrets.yml
 !config/webex-secrets.yml.example
 application-kimi.yml
+-e 
+# Log files (centralized logging - see logback-spring.xml)
+logs/
