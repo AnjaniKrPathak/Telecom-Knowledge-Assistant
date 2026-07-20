@@ -5,6 +5,7 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.rag.config.FullTextSearchSchemaInitializer;
 import com.rag.config.HybridSearchProperties;
 import com.rag.document.excel.ExcelCatalogFields;
+import dev.langchain4j.data.document.Metadata;
 import dev.langchain4j.data.embedding.Embedding;
 import dev.langchain4j.data.segment.TextSegment;
 import dev.langchain4j.model.embedding.EmbeddingModel;
@@ -17,6 +18,7 @@ import org.springframework.dao.DataAccessException;
 import org.springframework.jdbc.core.JdbcTemplate;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -72,6 +74,9 @@ public class HybridSearchService {
     @Value("${pgvector.table-name}")
     private String tableName;
 
+    @Value("${pgvector.dimension}")
+    private int embeddingDimension;
+
     public HybridSearchService(EmbeddingModel embeddingModel,
                                 EmbeddingStore<TextSegment> embeddingStore,
                                 JdbcTemplate jdbcTemplate,
@@ -105,6 +110,94 @@ public class HybridSearchService {
         log.info("Hybrid retrieval: {} vector candidates, {} BM25 candidates", vectorMatches.size(), keywordHits.size());
 
         return fuse(vectorMatches, keywordHits, topK);
+    }
+
+    /**
+     * Runs ONLY the BM25 keyword leg (no vector search, no fusion) and returns hits as
+     * ready-to-use {@code EmbeddingMatch<TextSegment>} objects — for callers like
+     * {@code RagQueryService} that want to inject exact-keyword recall (product codes, ticket
+     * IDs, long numeric identifiers, ...) into an existing vector-search-based pipeline as extra
+     * candidates for reranking, without adopting {@link RetrievedChunk} throughout that pipeline.
+     * <p>
+     * This exists because pure cosine similarity systematically under-ranks chunks whose only
+     * strong signal is an exact literal token — e.g. a 19-digit Price Key ID — since embeddings
+     * are trained to capture semantic meaning, not to treat "the same digit string" as maximally
+     * similar. BM25 has no such blind spot: an exact, rare term match scores highly regardless of
+     * whether the surrounding sentence "reads similar" to the question.
+     * <p>
+     * Each returned match's {@code score()} is a normalized (0.01–0.99] value derived from its
+     * BM25 score relative to the strongest hit in this batch — NOT comparable to cosine-similarity
+     * scores from vector search, and not meant to be; its only job is to (a) satisfy
+     * {@code EmbeddingMatch}'s score-must-be-in-[0,1] validation and (b) give a sensible relative
+     * ordering if these matches are shown standalone (e.g. in {@code SourceReference}). Downstream
+     * reranking re-scores relevance from the actual text anyway, so this normalization doesn't
+     * need to be more precise than "roughly ordered".
+     * <p>
+     * Returns an empty list (never throws) if hybrid search is disabled, the full-text index isn't
+     * available, or the BM25 leg itself fails for any reason — this is a recall supplement, not a
+     * required part of retrieval, so it must never be able to break a query.
+     */
+    public List<EmbeddingMatch<TextSegment>> bm25CandidateMatches(String question, int limit) {
+        if (!properties.isEnabled() || !schemaInitializer.isFullTextSearchAvailable()) {
+            return List.of();
+        }
+        try {
+            List<KeywordHit> hits = bm25Search(question, limit);
+            if (hits.isEmpty()) {
+                return List.of();
+            }
+            double maxScore = hits.stream().mapToDouble(KeywordHit::bm25Score).max().orElse(0.0);
+
+            List<EmbeddingMatch<TextSegment>> result = new ArrayList<>(hits.size());
+            for (KeywordHit hit : hits) {
+                double normalizedScore = maxScore <= 0
+                        ? 0.5
+                        : Math.min(0.99, Math.max(0.01, hit.bm25Score() / maxScore));
+                TextSegment segment = TextSegment.from(hit.text(), buildMetadata(hit));
+                result.add(new EmbeddingMatch<>(normalizedScore, hit.id(), dummyEmbedding(), segment));
+            }
+            return result;
+        } catch (Exception e) {
+            log.warn("BM25 candidate-match lookup failed, continuing without it: {}", e.getMessage());
+            return List.of();
+        }
+    }
+
+    /** Rebuilds a Metadata object matching what ingestion originally stored, from a KeywordHit's raw columns. */
+    private Metadata buildMetadata(KeywordHit hit) {
+        Metadata metadata = Metadata.from("source", hit.source() == null ? "" : hit.source());
+        if (hit.type() != null) {
+            metadata = metadata.put("type", hit.type());
+        }
+        if (hit.workbook() != null) {
+            metadata = metadata.put("workbook", hit.workbook());
+        }
+        if (hit.sheet() != null) {
+            metadata = metadata.put("sheet", hit.sheet());
+        }
+        if (hit.sheetType() != null) {
+            metadata = metadata.put("sheetType", hit.sheetType());
+        }
+        if (hit.rowStart() != null) {
+            metadata = metadata.put("rowStart", hit.rowStart());
+        }
+        if (hit.rowEnd() != null) {
+            metadata = metadata.put("rowEnd", hit.rowEnd());
+        }
+        for (Map.Entry<String, String> entry : hit.catalogFields().entrySet()) {
+            metadata = metadata.put(entry.getKey(), entry.getValue());
+        }
+        return metadata;
+    }
+
+    /**
+     * A zero vector matching the configured embedding dimension, used only to satisfy
+     * {@code EmbeddingMatch}'s constructor — nothing downstream (reranker, feedback ranking,
+     * source-reference building) ever reads {@code match.embedding()}, only {@code match.embedded()}
+     * (the TextSegment) and {@code match.score()}, so this placeholder never influences an answer.
+     */
+    private Embedding dummyEmbedding() {
+        return Embedding.from(new float[embeddingDimension]);
     }
 
     // -- Vector leg --------------------------------------------------------------

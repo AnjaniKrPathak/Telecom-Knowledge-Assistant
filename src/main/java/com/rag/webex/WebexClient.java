@@ -42,14 +42,44 @@ public class WebexClient {
 
     @PostConstruct
     public void init() {
-        try {
-            this.botIdentity = getMyOwnIdentity();
-            log.info("Webex bot connected as '{}' ({})",
-                    botIdentity.getDisplayName(), botIdentity.getId());
-        } catch (Exception e) {
-            log.warn("Could not resolve Webex bot identity at startup. " +
-                    "Check webex.bot-token. Cause: {}", e.getMessage());
+        resolveBotIdentityWithRetry();
+    }
+
+    /**
+     * Resolves the bot's own identity with a few retries (short backoff) instead of giving up
+     * after one failed attempt. This matters a lot more than a typical "nice to have" retry: while
+     * {@code botIdentity} is null, {@link #isFromBot} can never return true, which means the bot
+     * cannot tell its own replies apart from a real user's messages — every reply it posts would
+     * itself trigger a new "messages/created" webhook event that looks exactly like a fresh
+     * question, and {@code WebexBotService} would answer it, triggering another reply, forever.
+     * A single transient failure to reach the Webex API at startup (slow network, brief outage)
+     * would otherwise cause exactly that runaway self-reply loop for the rest of the process's
+     * lifetime, with no way to recover short of a restart.
+     */
+    private void resolveBotIdentityWithRetry() {
+        int maxAttempts = 3;
+        for (int attempt = 1; attempt <= maxAttempts; attempt++) {
+            try {
+                this.botIdentity = getMyOwnIdentity();
+                log.info("Webex bot connected as '{}' ({})", botIdentity.getDisplayName(), botIdentity.getId());
+                return;
+            } catch (Exception e) {
+                log.warn("Could not resolve Webex bot identity (attempt {}/{}): {}", attempt, maxAttempts, e.getMessage());
+                if (attempt < maxAttempts) {
+                    try {
+                        Thread.sleep(2000L * attempt);
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        break;
+                    }
+                }
+            }
         }
+        log.error("Webex bot identity could NOT be resolved after {} attempts. Until this succeeds, isFromBot() " +
+                        "will always return false, meaning the bot cannot recognize its own messages — this risks " +
+                        "an endless self-reply loop if the bot ever posts into a room it's also listening to. " +
+                        "Check webex.bot-token and network access to {}, then restart the app.",
+                maxAttempts, webexProperties.getApiBaseUrl());
     }
 
     /** GET /v1/people/me — resolves the identity tied to the configured bot token. */
@@ -208,6 +238,15 @@ public class WebexClient {
     /** True if this personId belongs to the bot itself (used to avoid the bot replying to itself). */
     public boolean isFromBot(String personId) {
         return botIdentity != null && botIdentity.getId().equals(personId);
+    }
+
+    /**
+     * False means {@link #isFromBot} can never return true right now (identity not yet resolved,
+     * or all retries at startup failed) — callers that reply into rooms should treat this as "do
+     * not risk auto-replying" rather than assuming every incoming message is from a real user.
+     */
+    public boolean isBotIdentityResolved() {
+        return botIdentity != null;
     }
 
     public String getBotId() {

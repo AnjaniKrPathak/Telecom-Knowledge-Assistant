@@ -50,9 +50,13 @@ public final class ExcelCatalogFields {
     public static final String TAB_HEADER = "tabHeader";
 
     /** Metadata keys that describe the chunk itself (not a business field) and must never be treated
-     *  as a catalog/identifier field, whether by alias matching or by the generic fallback. */
+     *  as a catalog/identifier field, whether by alias matching or by the generic fallback.
+     *  "index" is not something this project sets itself — LangChain4j's DocumentSplitter stamps
+     *  it onto every TextSegment automatically (the chunk's sequence position within its source
+     *  document), so it needs excluding here the same as the app's own structural keys, or it gets
+     *  mistaken for a business identifier (see EntityExtractionService, which relies on this list). */
     private static final Set<String> STRUCTURAL_KEYS = Set.of(
-            "source", "type", "category", "workbook", "sheet", "sheetType", "rowStart", "rowEnd");
+            "source", "type", "category", "workbook", "sheet", "sheetType", "rowStart", "rowEnd", "index");
 
     /** canonical metadata key -> acceptable header-text synonyms (compared after normalization). */
     private static final Map<String, List<String>> SYNONYMS = buildSynonyms();

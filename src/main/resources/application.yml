@@ -65,6 +65,15 @@ pgvector:
   dimension: 768          # nomic-embed-text dimension
   table-name: document_embeddings
 
+# Neo4j Configuration — powers the Knowledge Graph feature (see rag.graph.* below)
+neo4j:
+  uri: bolt://localhost:7687
+  username: neo4j
+  password: ragpassword
+  database: neo4j
+  max-connection-pool-size: 50
+  connection-acquisition-timeout-seconds: 30
+
 # RAG Configuration
 rag:
   chunk-size: 500
@@ -159,6 +168,19 @@ rag:
                                  # "how does Z work") to the DOCX narrative chunks (FDS/BRD/rules) only
     fallback-when-empty: true   # if the category-filtered search returns nothing, retry unfiltered
                                  # instead of answering "I don't know" (covers docs ingested pre-feature)
+  graph:
+    enabled: true                        # master switch for the Neo4j knowledge-graph feature
+    auto-ingest: true                    # extract entities/relationships during normal file ingestion
+                                          # (in addition to/instead of running a one-off /api/graph/backfill)
+    entity-co-occurrence: true           # link entities that appear together in the same chunk/row
+    max-path-depth: 6                    # hop ceiling for graph search / shortest-path / all-paths
+    max-dependency-depth: 4              # hop ceiling for dependency / root-cause / impact traversals
+    backfill-batch-size: 500             # rows read per page when POST /api/graph/backfill scans document_embeddings
+    query-augmentation-enabled: true    # when true, RagQueryService adds a short "related knowledge graph
+                                          # context" block (dependencies/impact of entities in the retrieved
+                                          # chunks) to the prompt — off by default so it can be evaluated
+                                          # before it's part of every answer
+    query-augmentation-max-entities: 5   # cap on how many recognized entities get graph-expanded per query
 
 # Logging
 logging:

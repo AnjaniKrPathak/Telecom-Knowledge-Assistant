@@ -5,8 +5,10 @@ import com.rag.config.IntentRoutingProperties;
 import com.rag.config.RerankerProperties;
 import com.rag.document.DocumentCategoryClassifier;
 import com.rag.document.excel.ExcelCatalogFields;
+import com.rag.graph.service.GraphContextEnricherService;
 import com.rag.query.IntentDetectionService;
 import com.rag.query.QueryIntent;
+import com.rag.search.HybridSearchService;
 import dev.langchain4j.data.document.Metadata;
 import dev.langchain4j.data.embedding.Embedding;
 import dev.langchain4j.data.message.AiMessage;
@@ -24,6 +26,7 @@ import lombok.extern.slf4j.Slf4j;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.LinkedHashMap;
 import java.util.List;
@@ -49,6 +52,8 @@ public class RagQueryService {
     private final RerankerProperties rerankerProperties;
     private final IntentDetectionService intentDetectionService;
     private final IntentRoutingProperties intentRoutingProperties;
+    private final GraphContextEnricherService graphContextEnricherService;
+    private final HybridSearchService hybridSearchService;
 
     @Value("${rag.max-results}")
     private int maxResults;
@@ -120,7 +125,7 @@ public class RagQueryService {
                 ? Math.max(rerankerProperties.getCandidatePoolSize(), maxResults)
                 : maxResults;
 
-        List<EmbeddingMatch<TextSegment>> matches = searchByIntent(questionEmbedding, fetchSize, intent);
+        List<EmbeddingMatch<TextSegment>> matches = searchByIntent(question, questionEmbedding, fetchSize, intent);
         log.info("Retrieved {} candidate chunks (fetchSize={}, intent={})", matches.size(), fetchSize, intent);
 
         // 2a. Cross-encoder / LLM reranking — reorders by actual relevance to the question,
@@ -139,7 +144,7 @@ public class RagQueryService {
         if (matches.isEmpty()) {
             String noAnswer = "I don't have enough information in the knowledge base to answer this question.";
             String interactionId = conversationMemoryService.addAssistantMessage(effectiveSessionId, noAnswer, List.of());
-            return new RagResponse(question, noAnswer, List.of(), effectiveSessionId, interactionId, intent.name());
+            return new RagResponse(question, noAnswer, List.of(), effectiveSessionId, interactionId, intent.name(), List.of());
         }
 
         // 3. Build context from retrieved chunks
@@ -147,11 +152,19 @@ public class RagQueryService {
                 .map(match -> match.embedded().text())
                 .collect(Collectors.joining("\n\n---\n\n"));
 
+        // 3a. Optional knowledge-graph augmentation — off by default (rag.graph.query-augmentation-enabled).
+        // Recognizes catalog entities already present in the retrieved chunks and adds their known
+        // dependencies/impact from the graph, which can surface relationships that live in OTHER
+        // chunks than the ones retrieved for this specific question. Fails open (see
+        // GraphContextEnricherService) — a Neo4j outage never blocks answering from vector search alone.
+        List<TextSegment> retrievedSegments = matches.stream().map(EmbeddingMatch::embedded).toList();
+        GraphContextEnricherService.GraphContext graphContext = graphContextEnricherService.enrich(retrievedSegments);
+
         // 3b. Conversation history (if any) so the model can resolve follow-up references.
         String history = conversationMemoryService.buildHistoryContext(effectiveSessionId);
 
         // 4. Build RAG prompt
-        String prompt = buildPrompt(question, context, history);
+        String prompt = buildPrompt(question, context, history, graphContext.promptBlock());
 
         // 5. Generate answer using llama3
         listener.onGenerating(matches.size());
@@ -179,7 +192,8 @@ public class RagQueryService {
                 .toList();
         String interactionId = conversationMemoryService.addAssistantMessage(effectiveSessionId, answer, sourceNames);
 
-        RagResponse ragResponse = new RagResponse(question, answer, sources, effectiveSessionId, interactionId, intent.name());
+        RagResponse ragResponse = new RagResponse(question, answer, sources, effectiveSessionId, interactionId,
+                intent.name(), graphContext.relatedEntities());
 
         // Only cache first-turn (context-free) answers — see cache check above.
         if (!isFollowUp) {
@@ -197,7 +211,8 @@ public class RagQueryService {
                 .distinct()
                 .toList();
         String interactionId = conversationMemoryService.addAssistantMessage(sessionId, cached.answer(), sourceNames);
-        return new RagResponse(cached.question(), cached.answer(), cached.sources(), sessionId, interactionId, cached.intent());
+        return new RagResponse(cached.question(), cached.answer(), cached.sources(), sessionId, interactionId,
+                cached.intent(), cached.graphContext());
     }
 
     /**
@@ -231,21 +246,61 @@ public class RagQueryService {
      * search comes back empty (e.g. older chunks ingested before this feature existed have no
      * {@code category} metadata), falls back to an unfiltered search rather than telling the
      * user "I don't know" purely because of a routing miss.
+     * <p>
+     * Also merges in BM25 keyword-search recall candidates (see {@code HybridSearchService})
+     * that pure cosine similarity may have missed entirely — this matters most for chunks whose
+     * relevance hinges on an exact literal token (a long numeric ID, a product code, a ticket
+     * number) rather than overall semantic similarity, which embeddings systematically under-rank.
+     * The keyword leg isn't category-filtered (it runs over the whole corpus), so it can surface a
+     * correct answer even when intent routing guessed the wrong category — reranking afterward is
+     * what ultimately decides whether an injected candidate is actually relevant.
      */
-    private List<EmbeddingMatch<TextSegment>> searchByIntent(Embedding questionEmbedding, int fetchSize, QueryIntent intent) {
+    private List<EmbeddingMatch<TextSegment>> searchByIntent(String question, Embedding questionEmbedding,
+                                                               int fetchSize, QueryIntent intent) {
+        List<EmbeddingMatch<TextSegment>> matches;
         if (!intentRoutingProperties.isEnabled()) {
-            return embeddingStore.search(buildSearchRequest(questionEmbedding, fetchSize, null)).matches();
-        }
-
-        Filter filter = intentFilter(intent);
-        List<EmbeddingMatch<TextSegment>> matches =
-                embeddingStore.search(buildSearchRequest(questionEmbedding, fetchSize, filter)).matches();
-
-        if (matches.isEmpty() && intentRoutingProperties.isFallbackWhenEmpty()) {
-            log.info("Category-filtered search for intent={} returned no candidates — retrying unfiltered", intent);
             matches = embeddingStore.search(buildSearchRequest(questionEmbedding, fetchSize, null)).matches();
+        } else {
+            Filter filter = intentFilter(intent);
+            matches = embeddingStore.search(buildSearchRequest(questionEmbedding, fetchSize, filter)).matches();
+
+            if (matches.isEmpty() && intentRoutingProperties.isFallbackWhenEmpty()) {
+                log.info("Category-filtered search for intent={} returned no candidates — retrying unfiltered", intent);
+                matches = embeddingStore.search(buildSearchRequest(questionEmbedding, fetchSize, null)).matches();
+            }
         }
-        return matches;
+        return mergeBm25Recall(question, matches, fetchSize);
+    }
+
+    /**
+     * Adds any BM25-only hits (chunks the keyword leg found that vector search's candidate pool
+     * didn't include at all) up to the same {@code fetchSize} pool cap, de-duplicated by
+     * {@code embeddingId} against what vector search already returned. Fails open — if hybrid
+     * search is disabled or the Postgres full-text index is unavailable for any reason, this
+     * just returns the vector-only candidate pool unchanged.
+     */
+    private List<EmbeddingMatch<TextSegment>> mergeBm25Recall(
+            String question, List<EmbeddingMatch<TextSegment>> vectorMatches, int fetchSize) {
+        List<EmbeddingMatch<TextSegment>> bm25Matches = hybridSearchService.bm25CandidateMatches(question, fetchSize);
+        if (bm25Matches.isEmpty()) {
+            return vectorMatches;
+        }
+
+        Map<String, EmbeddingMatch<TextSegment>> merged = new LinkedHashMap<>();
+        vectorMatches.forEach(m -> merged.put(m.embeddingId(), m));
+
+        int added = 0;
+        for (EmbeddingMatch<TextSegment> bm25Match : bm25Matches) {
+            if (merged.containsKey(bm25Match.embeddingId()) || merged.size() >= fetchSize) {
+                continue;
+            }
+            merged.put(bm25Match.embeddingId(), bm25Match);
+            added++;
+        }
+        if (added > 0) {
+            log.info("Hybrid recall: added {} keyword-only candidate(s) not found by vector search alone", added);
+        }
+        return new ArrayList<>(merged.values());
     }
 
     private EmbeddingSearchRequest buildSearchRequest(Embedding questionEmbedding, int fetchSize, Filter filter) {
@@ -266,11 +321,15 @@ public class RagQueryService {
                 : metadataKey("category").isIn(DocumentCategoryClassifier.EXPLANATION_CATEGORIES);
     }
 
-    private String buildPrompt(String question, String context, String history) {
+    private String buildPrompt(String question, String context, String history, String graphContextBlock) {
         String historyBlock = (history == null || history.isBlank())
                 ? ""
                 : "Conversation so far (for resolving references like \"it\"/\"that\"/\"the second one\" — " +
                   "do not treat this as source material):\n" + history + "\n\n";
+
+        String graphBlock = (graphContextBlock == null || graphContextBlock.isBlank())
+                ? ""
+                : graphContextBlock + "\n";
 
         return """
                 You are a helpful assistant. Use ONLY the context below to answer the question.
@@ -279,15 +338,16 @@ public class RagQueryService {
                 %sContext:
                 %s
                 
-                Question: %s
+                %sQuestion: %s
                 
                 Answer:
-                """.formatted(historyBlock, context, question);
+                """.formatted(historyBlock, context, graphBlock, question);
     }
 
     // ── Response DTOs ────────────────────────────────────────────────────────
     public record RagResponse(String question, String answer, List<SourceReference> sources,
-                               String sessionId, String interactionId, String intent) {}
+                               String sessionId, String interactionId, String intent,
+                               List<Map<String, Object>> graphContext) {}
 
     public record SourceReference(String source, String type, double score, String excerpt,
                                    Map<String, String> metadata) {}

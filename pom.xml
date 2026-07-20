@@ -96,6 +96,18 @@
             <artifactId>caffeine</artifactId>
         </dependency>
 
+        <!-- Neo4j Java Driver — powers the Knowledge Graph feature (com.rag.graph.*).
+             Uses the plain Bolt driver directly (not spring-boot-starter-data-neo4j / Spring Data
+             Neo4j repositories) so it can't collide with the existing Spring Data JPA repository
+             scanning already configured for Postgres, and so graph reads/writes stay explicit
+             Cypher — the same "direct driver, explicit queries" style already used for Postgres
+             via JdbcTemplate in HybridSearchService. -->
+        <dependency>
+            <groupId>org.neo4j.driver</groupId>
+            <artifactId>neo4j-java-driver</artifactId>
+            <version>5.24.0</version>
+        </dependency>
+
         <!-- PostgreSQL Driver -->
         <dependency>
             <groupId>org.postgresql</groupId>
